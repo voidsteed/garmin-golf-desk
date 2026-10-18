@@ -1,0 +1,25 @@
+# Contributing
+
+Use Windows and Python 3.12 or newer with Tcl/Tk installed.
+
+```powershell
+.\setup.ps1 -NoShortcuts
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Tests must stay offline and use synthetic accounts and golf data. Never add real
+Garmin exports, real screenshots, credentials, token caches, or private location
+data to a commit. Do not add automatic login attempts to tests.
+
+Keep the distinction between:
+
+- GIR versus a tracked approach's on-green finish;
+- fairway outcomes versus par-3 tee outcomes;
+- stock carry versus recorded shot length including roll;
+- wedge approaches versus chips or recovery shots;
+- observed frequencies versus assumed probabilities;
+- sensitivity ranges versus statistical confidence intervals.
+
+The app must not claim proven positive EV or guaranteed handicap improvement
+from a small or incomplete dataset. Never suppress unknown outcomes to improve a
+chart. All account-mutating operations are out of scope for this read-only app.

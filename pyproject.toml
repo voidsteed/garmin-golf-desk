@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "garmin-golf-desk"
+version = "0.1.0"
+description = "A private Windows golf dashboard and transparent course-management planner for your own Garmin account"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{name = "voidsteed"}]
+dependencies = ["garminconnect==0.3.19"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: Games/Entertainment :: Simulation",
+]
+
+[project.gui-scripts]
+golf-desk = "golf_app:main"
+
+[tool.setuptools]
+py-modules = [
+  "export_golf", "golf_app", "golf_charts", "golf_clubs", "golf_coaching",
+  "golf_data", "golf_ev", "golf_game", "golf_icon", "golf_planner_ui",
+  "golf_service", "golf_store", "golf_strategy",
+]
