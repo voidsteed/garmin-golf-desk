@@ -67,7 +67,7 @@ def full_game_snapshot(model, selected=None):
                 counts["zero" if putts==0 else "one" if putts==1 else "two" if putts==2 else "three_plus"] += 1
                 if putts>=4:
                     counts["four_plus"] += 1
-        putting.append({"date":r["date"],"course":r["course"],"putts":r["putts"],"holes":r["holes_completed"],
+        putting.append({"date":r["date"],"sort_date":r["sort_date"],"round_id":r["id"],"course":r["course"],"putts":r["putts"],"holes":r["holes_completed"],
                         "tracked":counts["tracked"],"tracked_sum":counts["sum"],"one":counts["one"],"two":counts["two"],
                         "three_plus":counts["three_plus"],"four_plus":counts["four_plus"],
                         "putts_per_hole":counts["sum"]/counts["tracked"] if counts["tracked"] else None})
@@ -97,8 +97,9 @@ def full_game_snapshot(model, selected=None):
     three_complete = [x["three_plus"] for x in putting if x["tracked"]==x["holes"] and x["holes"]==18]
     fw_hit = sum(r["fairways_hit"] or 0 for r in rounds if r["fairways_recorded"])
     fw_total = sum(r["fairways_recorded"] or 0 for r in rounds)
+    putting_kind = 18 if any(r["holes_completed"]==18 for r in rounds) else 9
     return {"tee":tee_rows,"wedges":wedge_rows,"putting":putting,"shot_holes":coverage,"expected_holes":expected,
             "ambiguous_tee_holes":ambiguous,"fairway_percent":percent(fw_hit,fw_total),
-            "average_putts":average([r["putts"] for r in rounds]),"three_putts_per_full_round":average(three_complete),
+            "average_putts":average([r["putts"] for r in rounds if r["holes_completed"]==putting_kind]),"average_putts_holes":putting_kind,"three_putts_per_full_round":average(three_complete),
             "tracked_putting_holes":tracked,"putts_per_tracked_hole":sum(x["tracked_sum"] for x in putting)/tracked if tracked else None,
             "chip_shots":sum(x["chip"]["shots"] for x in wedge_rows),"wedge_approaches":sum(x["approach"]["shots"] for x in wedge_rows)}

@@ -19,7 +19,7 @@ def optional_distance(value, name, maximum):
     return result
 
 
-def build_shot_plan(model, phase="tee", club_id=None, hazard="Not supplied", conditions="Not supplied", target=None, carry=None, hazard_carry=None, putt=None, break_direction="Not supplied", wedge_role="Approach / pitch", pin="Not supplied"):
+def build_shot_plan(model, phase="tee", club_id=None, hazard="Not supplied", conditions="Not supplied", target=None, carry=None, hazard_carry=None, putt=None, break_direction="Not supplied", wedge_role="Approach / pitch", pin="Not supplied", selected=None):
     if phase not in {"tee","approach","wedge","putting"}:
         raise ValueError("Choose tee, approach, wedge, or putting.")
     target = optional_distance(target,"target distance in yards",600)
@@ -28,7 +28,7 @@ def build_shot_plan(model, phase="tee", club_id=None, hazard="Not supplied", con
     putt = optional_distance(putt,"putt length in feet",500)
     club = str(club_id or 0)
     name = model.club_label(club)[0]
-    rounds = model.full_rounds[:3]
+    rounds = model.full_rounds[:3] if selected is None else selected
     game = full_game_snapshot(model,rounds)
     evidence, checks = [],[]
     miss_side = {"Left":"right-center","Right":"left-center","Short / front":"center with reliable clearance","Long / back":"front-center with room","Both sides":"widest safe center"}.get(hazard,"widest safe center")
@@ -73,7 +73,7 @@ def build_shot_plan(model, phase="tee", club_id=None, hazard="Not supplied", con
         miss = "Leave the simplest possible next putt. On a fast downhill putt, favor gentle arrival speed instead of a long comeback."
         practice = "Use a 20/30/40-foot ladder, then putt every ball out from its actual finish."
         if game["three_putts_per_full_round"] is not None:
-            evidence.append(f"Your latest recorded full rounds average {game['three_putts_per_full_round']:.1f} three-putt-or-worse holes. Verify tracking, then prioritize pace and short-putt conversion.")
+            evidence.append(f"The selected recorded 18-hole games average {game['three_putts_per_full_round']:.1f} three-putt-or-worse holes. Verify tracking, then prioritize pace and short-putt conversion.")
         checks.append("The exact amount of break requires the live slope, speed and your chosen pace; no fixed inches or aim coordinates are invented here.")
     if phase!="putting":
         if carry is None:
@@ -106,7 +106,7 @@ def build_shot_plan(model, phase="tee", club_id=None, hazard="Not supplied", con
             sides = [(k,aggregate[k]) for k in ("short","long","left","right") if aggregate[k] is not None]
             if sides:
                 side,value = max(sides,key=lambda x:x[1])
-                evidence.append(f"Garmin’s aggregate {name} green-miss categories are most often {side} ({value:.1f}% of outcomes). This is not restricted to the latest three rounds or a live dispersion map.")
+                evidence.append(f"Garmin’s aggregate {name} green-miss categories are most often {side} ({value:.1f}% of outcomes). This is not restricted to the selected games or a live dispersion map.")
     if layup:
         aim = "Do not attempt this forced carry with the normal carry entered. Lay up to a genuinely safe area or select a club with enough reliable carry and margin."
     return {"phase":phase,"club":name,"aim":aim,"decision":decision,"miss":miss,"practice":practice,"checks":checks,"evidence":evidence,

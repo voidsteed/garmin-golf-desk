@@ -85,8 +85,9 @@ def draw_target_zone(canvas,plan):
 
 
 class StrategyView:
-    def __init__(self,parent,model,state):
+    def __init__(self,parent,model,state,selected=None):
         self.model,self.state = model,state
+        self.selected=selected
         self.vars = {k:tk.StringVar(value=state.get(k,default)) for k,default in {
             "phase":"tee","hazard":"Not supplied","conditions":"Not supplied","pin":"Not supplied",
             "wedge_role":"Approach / pitch","break_direction":"Not supplied","target":"","carry":"","hazard_carry":"","putt":""}.items()}
@@ -141,7 +142,7 @@ class StrategyView:
         if phase=="tee":
             default = next((n for n,k in self.choices.items() if str(self.model.clubs.get(k,{}).get("clubTypeId"))=="1"),default)
         elif phase=="approach":
-            top = next((r for r in self.model.approach_analysis()["clubs"] if not r["unassigned"]),None)
+            top = next((r for r in self.model.approach_analysis(self.selected)["clubs"] if not r["unassigned"]),None)
             if top:
                 default = next((n for n,k in self.choices.items() if k==top["id"]),default)
         self.club_var = tk.StringVar(value=self.state.get("club_"+phase,default))
@@ -178,7 +179,7 @@ class StrategyView:
         if phase=="tee":
             kwargs["pin"] = "Not supplied"
         try:
-            self.plan = build_shot_plan(self.model,club_id=self.choices[self.club_var.get()],**kwargs)
+            self.plan = build_shot_plan(self.model,club_id=self.choices[self.club_var.get()],selected=self.selected,**kwargs)
         except ValueError as exc:
             self.error.configure(text=str(exc))
             return

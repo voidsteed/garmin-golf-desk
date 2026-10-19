@@ -19,6 +19,9 @@ Keep the distinction between:
 - wedge approaches versus chips or recovery shots;
 - observed frequencies versus assumed probabilities;
 - sensitivity ranges versus statistical confidence intervals.
+- shared selected-game statistics versus account-wide Garmin aggregates;
+- 9-hole versus 18-hole gross scores, and missing tracking versus a recorded zero;
+- within-role historical club consistency versus current-shot confidence or EV.
 
 The app must not claim proven positive EV or guaranteed handicap improvement
 from a small or incomplete dataset. Never suppress unknown outcomes to improve a

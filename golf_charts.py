@@ -3,6 +3,8 @@
 import math
 import tkinter as tk
 
+from golf_history import moving_average
+
 WHITE, INK, MUTED = "#FFFFFF", "#15382E", "#65766D"
 GREEN, MINT, AMBER, ORANGE, GREY = "#137B56", "#E4F2E9", "#C78C37", "#DBA55A", "#BAC4BD"
 FONT = "Segoe UI"
@@ -158,7 +160,8 @@ def draw_tee_bars(canvas, rows):
 
 def draw_putting_bars(canvas, rows):
     canvas.delete("all")
-    rows = rows[:6]
+    kind=18 if any(r["holes"]==18 for r in rows) else 9
+    rows=sorted((r for r in rows if r["holes"]==kind),key=lambda r:(r.get("sort_date",r["date"]),r.get("round_id","")))
     w,h = canvas.winfo_width(),canvas.winfo_height()
     if not rows:
         text(canvas,20,60,"No putting scorecards yet.",11,color=MUTED)
@@ -169,18 +172,127 @@ def draw_putting_bars(canvas, rows):
         y = bottom-(bottom-top)*n/maximum
         canvas.create_line(left,y,right,y,fill="#E9EEE8")
         text(canvas,left-10,y,str(n),8,color=MUTED,anchor="e")
-    goal_y = bottom-(bottom-top)*2/maximum
-    canvas.create_line(left,goal_y,right,goal_y,fill=GREEN,dash=(5,4),width=2)
-    text(canvas,right,goal_y-12,"Starter goal: ≤2",8,color=GREEN,anchor="e")
+    if kind==18:
+        goal_y = bottom-(bottom-top)*2/maximum
+        canvas.create_line(left,goal_y,right,goal_y,fill=GREEN,dash=(5,4),width=2)
+        text(canvas,right,goal_y-12,"18-hole goal: ≤2",8,color=GREEN,anchor="e")
     gap = (right-left)/len(rows)
     for i,row in enumerate(rows):
         x = left+gap*(i+.5)
-        complete = row["tracked"]==row["holes"] and row["holes"]==18
+        complete = row["tracked"]==row["holes"]
         value = row["three_plus"]
         y = bottom-(bottom-top)*value/maximum
-        canvas.create_rectangle(x-gap*.22,y,x+gap*.22,bottom,fill=GREEN if complete and value<=2 else ORANGE if complete else GREY,outline="")
-        text(canvas,x,y-14,str(value)+("" if complete else "*"),11,bold=True,anchor="center")
-        text(canvas,x,bottom+19,row["date"][5:],8,color=MUTED,anchor="center")
+        canvas.create_rectangle(x-gap*.22,y,x+gap*.22,bottom,fill=GREEN if complete and kind==18 and value<=2 else ORANGE if complete else GREY,outline="")
+        if len(rows)<=15:
+            text(canvas,x,y-14,str(value)+("" if complete else "*"),10,bold=True,anchor="center")
+        if i in (0,len(rows)-1) or i%max(1,math.ceil(len(rows)/5))==0:
+            text(canvas,x,bottom+19,row["date"][5:],8,color=MUTED,anchor="center")
+
+
+def draw_history_trend(canvas,series,window=5,on_round=None):
+    canvas.delete("all")
+    w,h=canvas.winfo_width(),canvas.winfo_height()
+    if w<160 or h<100:
+        return
+    slots=series["slots"]
+    values=[p["value"] for p in slots if p["value"] is not None]
+    if not values:
+        text(canvas,w/2,h/2,"No recorded data for this metric in the selected games.",10,color=MUTED,anchor="center",width=w-35)
+        canvas._trend_points=[]
+        return
+    if series["unit"]=="%":
+        low,high=0,100
+    elif series["key"].startswith("score"):
+        low=max(0,math.floor(min(values)-3))
+        high=math.ceil(max(values)+3)
+    else:
+        low=0
+        high=max(1,max(values)*1.2)
+    left,right,top,bottom=48,w-25,30,h-53
+    y_for=lambda value:bottom-(value-low)/(high-low)*(bottom-top)
+    for i in range(5):
+        value=low+(high-low)*i/4
+        y=y_for(value)
+        canvas.create_line(left,y,right,y,fill="#E9EEE8")
+        caption=f"{value:.1f}" if high<=5 else f"{value:.0f}"
+        text(canvas,left-9,y,caption,8,color=MUTED,anchor="e")
+    coordinates=[]
+    for i,p in enumerate(slots):
+        x=(left+right)/2 if len(slots)==1 else left+(right-left)*i/(len(slots)-1)
+        coordinates.append((x,y_for(p["value"]) if p["value"] is not None else None,p))
+    def lines(points,color,width,dash=None):
+        segment=[]
+        for x,y in points+[(None,None)]:
+            if y is None:
+                if len(segment)>=4:
+                    canvas.create_line(*segment,fill=color,width=width,**({"dash":dash} if dash else {}))
+                segment=[]
+            else:
+                segment.extend((x,y))
+    lines([(x,y) for x,y,_ in coordinates],GREEN,2)
+    if window:
+        rolling=moving_average(slots,window)
+        lines([(coordinates[i][0],y_for(v) if v is not None else None) for i,v in enumerate(rolling)],AMBER,3,(5,3))
+    for i,(x,y,p) in enumerate(coordinates):
+        if y is not None:
+            canvas.create_oval(x-3,y-3,x+3,y+3,fill=GREEN,outline=WHITE)
+        else:
+            text(canvas,x,bottom-6,"?",8,color=MUTED,anchor="center")
+        if i in (0,len(slots)-1) or i%max(1,math.ceil(len(slots)/4))==0:
+            text(canvas,x,bottom+18,p["date"][5:],8,color=MUTED,anchor="center")
+    last=next((p for p in reversed(coordinates) if p[1] is not None),None)
+    if last:
+        x,y,p=last
+        text(canvas,x,min(bottom-10,max(top-13,y-14)),f"{p['value']:.1f}"+("%" if series["unit"]=="%" else ""),9,color=GREEN,bold=True,anchor="center")
+    pooled=series["unit"]=="%" or series["key"]=="putts_per_hole"
+    text(canvas,left,h-12,"● Recorded game"+(f"    - - {window}-game {'pooled rate' if pooled else 'rolling mean'}" if window else ""),8,color=MUTED)
+    canvas._trend_points=coordinates
+    def nearest(event):
+        if not coordinates or not left-10<=event.x<=right+10 or not top-20<=event.y<=bottom+15:
+            return None
+        index=round((event.x-left)/(right-left)*(len(coordinates)-1)) if len(coordinates)>1 else 0
+        return coordinates[max(0,min(len(coordinates)-1,index))]
+    def hover(event):
+        canvas.delete("hover")
+        point=nearest(event)
+        if point:
+            p=point[2]
+            value="Not recorded" if p["value"] is None else f"{p['value']:.2f} {series['unit']}"
+            if "classified" in p:
+                value+=f" · {p['hits']}/{p['classified']} target hits"
+            canvas.create_text(w-12,8,text=f"{p['date']} · {value}",font=(FONT,8),fill=INK,anchor="ne",tags="hover")
+    canvas.bind("<Motion>",hover)
+    canvas.bind("<Leave>",lambda _:canvas.delete("hover"))
+    if on_round:
+        canvas.bind("<Button-1>",lambda e:on_round(nearest(e)[2]["id"]) if nearest(e) else None)
+
+
+def draw_club_confidence(canvas,report):
+    canvas.delete("all")
+    rows=report["rows"]
+    w=canvas.winfo_width()
+    if not rows:
+        text(canvas,20,65,"No recorded club outcomes for this role in the selected games.",11,color=MUTED,width=w-40)
+        return
+    maximum=max(1,max(r["records"] for r in rows))
+    left,right=185,w-240
+    for x,title,color in ((0,"Target hits",GREEN),(145,"Target misses",ORANGE),(300,"Unknown",GREY)):
+        canvas.create_rectangle(x,9,x+10,19,fill=color,outline="")
+        text(canvas,x+16,14,title,8,color=MUTED)
+    for i,row in enumerate(rows):
+        y=53+43*i
+        text(canvas,0,y,row["label"],10,bold=row["enough"],width=175)
+        canvas.create_rectangle(left,y-9,right,y+9,fill="#EDF1ED",outline="")
+        x=left
+        for key,color in (("hits",GREEN),("misses",ORANGE),("unknown",GREY)):
+            end=x+(right-left)*row[key]/maximum
+            if row[key]:
+                canvas.create_rectangle(x,y-9,end,y+9,fill=color,outline="")
+            x=end
+        rate="—" if row["rate"] is None else f"{row['rate']:.0f}%"+("*" if row["classified"]<10 else "")
+        hits_word="hit" if row["hits"]==1 else "hits"
+        misses_word="miss" if row["misses"]==1 else "misses"
+        text(canvas,right+12,y,f"{row['hits']} {hits_word} · {row['misses']} {misses_word} · {rate}",9,color=MUTED if row["unassigned"] else INK)
 
 
 def draw_putting_drill(canvas):

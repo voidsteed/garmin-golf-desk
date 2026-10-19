@@ -22,15 +22,18 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from export_golf import save_export
+from export_golf import MAX_DETAILED_ROUNDS,MAX_IMPORT_ROUNDS,round_count,save_export
 from golf_data import GolfSnapshot, average, load_snapshot, percent, read_export
-from golf_charts import chart, draw_approach_bars, draw_hole_heatmap, draw_miss_pattern, draw_priorities, draw_putting_bars, draw_putting_drill, draw_tee_bars, draw_wedge_bars
+from golf_charts import chart, draw_approach_bars, draw_hole_heatmap, draw_miss_pattern, draw_priorities, draw_putting_bars, draw_putting_drill, draw_tee_bars, draw_wedge_bars,draw_history_trend,draw_club_confidence
 from golf_coaching import improvement_snapshot
 from golf_game import full_game_snapshot
 from golf_planner_ui import ExpectedValueView,StrategyView
 from golf_icon import tk_icon_data
 from golf_service import SignInRequired, SyncCancelled, SyncError, sync_golf
 from golf_store import SessionStore, SessionStoreError, app_data_dir
+from golf_history import MAX_HISTORY_COUNT,RoundSelection,load_selection,save_selection,period_statistics,trend_series,default_trend_keys
+from golf_history_ui import RoundPicker
+from golf_confidence import ROLES,MIN_CLASSIFIED_SHOTS,club_confidence,club_history
 
 TITLE = "Golf Desk · Garmin golf"
 BG, WHITE, INK, MUTED = "#F3F6F3", "#FFFFFF", "#15382E", "#65766D"
@@ -41,6 +44,10 @@ FONT = "Segoe UI"
 
 def fmt(value, digits=1, suffix=""):
     return "—" if value is None else f"{value:.{digits}f}{suffix}"
+
+
+def fmt_delta(value):
+    return "—" if value is None else "E" if value==0 else f"{value:+.0f}"
 
 
 def pretty_date(value):
@@ -113,10 +120,10 @@ class SyncDialog(tk.Toplevel):
         label(self.fields, "Your password is sent to Garmin, never saved by Golf Desk.", 9, color=MUTED, wraplength=420).pack(anchor="w", pady=(6, 14))
         controls = tk.Frame(body, bg=WHITE)
         controls.pack(fill="x", pady=(8, 0))
-        label(controls, "Recent rounds to import", 10, True).pack(side="left")
-        ttk.Combobox(controls, textvariable=self.scope, values=("3", "10", "20", "50", "100"), state="readonly", width=8).pack(side="right", ipady=4)
+        label(controls, "Latest scorecards to import", 10, True).pack(side="left")
+        ttk.Combobox(controls, textvariable=self.scope, values=("3", "10", "20", "30", "50", "100", "200", "500", "1000"), state="normal", width=8).pack(side="right", ipady=4)
         ttk.Checkbutton(body, text="Include detailed shots and locations", variable=self.shots).pack(anchor="w", pady=(18, 4))
-        label(body, "Needed for club-by-club approach review. Includes shot GPS positions.", 9, color=MUTED, wraplength=420).pack(anchor="w")
+        label(body, f"Up to {MAX_IMPORT_ROUNDS} scorecards, or {MAX_DETAILED_ROUNDS} rounds with shot GPS positions. Larger imports take longer and can be canceled.", 9, color=MUTED, wraplength=420,justify="left").pack(anchor="w")
         ttk.Checkbutton(body, text="Remember this PC", variable=self.remember).pack(anchor="w", pady=(18, 4))
         label(body, "Windows-encrypted session tokens, not your password. Garmin may still require sign-in again. Unchecking removes this app’s saved sign-in after a successful login.", 9, color=MUTED, wraplength=420, justify="left").pack(anchor="w")
         notice = tk.Frame(body, bg=MINT, padx=12, pady=10)
@@ -147,11 +154,18 @@ class SyncDialog(tk.Toplevel):
         self.destroy()
 
     def submit(self):
+        try:
+            count=round_count(self.scope.get())
+            if self.shots.get() and count>MAX_DETAILED_ROUNDS:
+                raise ValueError(f"Choose at most {MAX_DETAILED_ROUNDS} detailed rounds, or untick detailed shots for a larger scorecard history.")
+        except Exception as exc:
+            messagebox.showinfo("Import size",str(exc),parent=self)
+            return
         if not self.saved.get() and (not self.email.get().strip() or not self.password.get()):
             messagebox.showinfo("Sign-in needed", "Enter your Garmin email and password in this window.", parent=self)
             return
         credentials = None if self.saved.get() else {"email": self.email.get().strip(), "password": self.password.get()}
-        self.result = {"rounds": int(self.scope.get()), "include_shots": self.shots.get(), "remember": self.remember.get(), "credentials": credentials}
+        self.result = {"rounds": count, "include_shots": self.shots.get(), "remember": self.remember.get(), "credentials": credentials}
         self.password.set("")
         self.destroy()
 
@@ -213,21 +227,27 @@ class GolfApp:
         self.store = SessionStore(self.data_dir / "garmin-session.dpapi")
         self.local_labels = self.read_labels()
         self.model = load_snapshot(self.export_dir, self.local_labels)
+        self.history=load_selection(self.data_dir/"round-selection.json",self.model.account_identities)
         self.events = queue.Queue()
         self.cancel = threading.Event()
         self.busy = False
         self.closed = False
         self.page = "overview"
-        self.approach_mode = "Latest three · shot data"
+        self.approach_mode = "Selected games · shot data"
         self.approach_round = None
         self.selected_round = None
-        self.improvement_scope = "Latest 3 full rounds"
         self.pattern_club = None
-        self.game_scope = "Latest 3 full rounds"
         self.game_tab = "tee"
         self.improve_tab = "dashboard"
         self.strategy_state = {}
         self.ev_state = {}
+        self.overview_tab="summary"
+        self.rounds_tab="trends"
+        self.rolling_window=5
+        self.confidence_role="Approaches"
+        self.confidence_sort="Evidence & sample"
+        self.confidence_show_empty=False
+        self.confidence_trend_club=None
         self.last_options = {"rounds": 20, "include_shots": False, "remember": True}
         self.mfa_pending = None
         self.mfa_dialog = None
@@ -252,6 +272,7 @@ class GolfApp:
         style.configure("Treeview.Heading", background="#ECF1EC", foreground=MUTED, font=(FONT, 9, "bold"), relief="flat", padding=(8, 10))
         style.map("Treeview", background=[("selected", "#D5EDDF")], foreground=[("selected", INK)])
         style.configure("TCheckbutton", background=WHITE, foreground=INK, font=(FONT, 10), padding=2)
+        style.configure("History.TCheckbutton",background=BG,foreground=INK,font=(FONT,9),padding=2)
         style.configure("TCombobox", padding=5, font=(FONT, 10))
         style.configure("TEntry", padding=6)
         style.configure("Horizontal.TProgressbar", background=GREEN, troughcolor=MINT, borderwidth=0)
@@ -276,7 +297,7 @@ class GolfApp:
         label(brand, "GOLF DESK", 16, True, "#F2F8F0", NAVY).pack(anchor="w", pady=(12, 2))
         label(brand, "Know your next shot.", 9, color="#A2BCAF", bg=NAVY).pack(anchor="w")
         self.nav = {}
-        for key, text in (("overview", "Overview"), ("improve", "Improve my game"), ("rounds", "Latest 3 rounds"), ("clubs", "Approach clubs"), ("game", "Tee & short game"), ("privacy", "Data & privacy")):
+        for key, text in (("overview", "Overview"), ("improve", "Improve my game"), ("rounds", "Rounds & trends"), ("clubs", "Approach clubs"), ("game", "Tee & short game"), ("privacy", "Data & privacy")):
             item = tk.Button(self.sidebar, text=text, command=lambda k=key: self.show_page(k), font=(FONT, 11),
                              bg=NAVY, fg="#BCD0C3", activebackground="#244B39", activeforeground=WHITE,
                              anchor="w", relief="flat", bd=0, padx=22, pady=15, cursor="hand2", highlightthickness=0)
@@ -290,6 +311,7 @@ class GolfApp:
         main = tk.Frame(self.root, bg=BG)
         main.pack(side="left", fill="both", expand=True)
         heading = tk.Frame(main, bg=BG, padx=28, pady=24)
+        self.heading_frame=heading
         heading.pack(fill="x")
         actions = tk.Frame(heading, bg=BG)
         actions.pack(side="right", padx=(18, 0))
@@ -303,6 +325,23 @@ class GolfApp:
         self.subtitle = label(titles, "", 10, color=MUTED, bg=BG)
         self.subtitle.pack(anchor="w", pady=(6, 0))
         heading.bind("<Configure>", lambda e: self.wrap_header(e.width, actions.winfo_reqwidth()))
+        self.history_frame=tk.Frame(main,bg=BG,padx=28,pady=4)
+        self.history_frame.pack(fill="x",pady=(0,12))
+        history_controls=tk.Frame(self.history_frame,bg=BG)
+        history_controls.pack(fill="x")
+        label(history_controls,"GAMES",9,True,MUTED,BG).pack(side="left",padx=(0,12))
+        self.history_choice=tk.StringVar()
+        self.history_combo=ttk.Combobox(history_controls,textvariable=self.history_choice,state="readonly",width=23)
+        self.history_combo.pack(side="left",ipady=3)
+        self.history_combo.bind("<<ComboboxSelected>>",self.change_history_choice)
+        self.choose_games_button=button(history_controls,"Choose games…",self.choose_games)
+        self.choose_games_button.pack(side="left",padx=10)
+        self.full_only_var=tk.BooleanVar(value=self.history.full_only)
+        self.full_only_check=ttk.Checkbutton(history_controls,text="18-hole games only",style="History.TCheckbutton",variable=self.full_only_var,command=self.change_hole_filter)
+        self.full_only_check.pack(side="left",padx=6)
+        self.import_history_button=button(history_controls,"Import more games",lambda:self.open_sync(rounds=self.recommended_import_count()))
+        self.history_info=tk.StringVar()
+        tk.Label(self.history_frame,textvariable=self.history_info,bg=BG,fg=MUTED,font=(FONT,9),anchor="w",justify="left",wraplength=1110).pack(fill="x",pady=(7,0))
         self.progress_frame = tk.Frame(main, bg=BG, padx=28)
         self.progress_label = label(self.progress_frame, "", 10, color=GREEN, bg=BG)
         self.progress_label.pack(anchor="w")
@@ -320,6 +359,84 @@ class GolfApp:
     def refresh_session_status(self):
         self.session_status.set("Sign-in remembered with Windows encryption." if self.store.exists else "Browsing local exports. Sign in once to enable remembered updates.")
 
+    def selected_games(self):
+        return self.history.resolve(self.model)
+
+    def selected_description(self):
+        info=self.history.summary(self.model)
+        if not info["selected"]:
+            return "No imported games match this selection."
+        return f"{info['selected']} selected games · {pretty_date(info['oldest'])} to {pretty_date(info['newest'])}"
+
+    def refresh_history_controls(self):
+        values=[f"Last {n} games" for n in (3,5,10,20,30,50,100)]+["All imported games","Custom count…","Choose games…"]
+        current=self.history.label()
+        if current not in values:
+            values.insert(0,current)
+        self.history_combo.configure(values=values,state="disabled" if self.busy else "readonly")
+        self.history_choice.set(current)
+        self.full_only_var.set(self.history.full_only)
+        self.choose_games_button.configure(state="disabled" if self.busy else "normal")
+        self.full_only_check.state(["disabled"] if self.busy else ["!disabled"])
+        info=self.history.summary(self.model)
+        prefix=f"Showing {info['selected']} of {info['requested']} requested games ({info['available']} matching imported)." if info["shortfall"] else f"Showing {info['selected']} of {info['requested']} chosen games; some are filtered or unavailable." if self.history.mode=="manual" and info["selected"]<info["requested"] else self.selected_description()+"."
+        self.history_info.set(prefix+" Account handicap, Garmin aggregate club stats and manual EV inputs are not period-filtered.")
+        if info["shortfall"] and not self.busy:
+            self.import_history_button.pack(side="right")
+        else:
+            self.import_history_button.pack_forget()
+
+    def apply_history(self,selection):
+        self.history=selection
+        self.approach_round=None
+        self.selected_round=None
+        try:
+            save_selection(self.data_dir/"round-selection.json",selection,self.model.account_identities)
+        except OSError:
+            self.status.set("The game selection is active, but could not be remembered on this PC.")
+        self.show_page(self.page)
+
+    def change_history_choice(self,_=None):
+        choice=self.history_choice.get()
+        if choice in ("Choose games…","Chosen games"):
+            self.choose_games()
+        elif choice=="Custom count…":
+            initial=self.history.count if self.history.mode=="latest" else max(1,len(self.selected_games()))
+            count=simpledialog.askinteger("Custom history","How many latest completed games should be analyzed?",initialvalue=initial,minvalue=1,maxvalue=MAX_HISTORY_COUNT,parent=self.root)
+            if count is not None:
+                self.apply_history(RoundSelection("latest",count,full_only=self.history.full_only))
+        elif choice=="All imported games":
+            self.apply_history(RoundSelection("all",full_only=self.history.full_only))
+        elif choice.startswith("Last "):
+            self.apply_history(RoundSelection("latest",int(choice.split()[1]),full_only=self.history.full_only))
+        self.refresh_history_controls()
+
+    def change_hole_filter(self):
+        self.apply_history(RoundSelection(self.history.mode,self.history.count,self.history.ids,self.full_only_var.get()))
+
+    def choose_games(self):
+        if self.busy:
+            return
+        dialog=RoundPicker(self.root,self.model,self.history)
+        self.root.wait_window(dialog)
+        if dialog.result is not None:
+            self.apply_history(dialog.result)
+        else:
+            self.refresh_history_controls()
+
+    def recommended_import_count(self,shots=False):
+        selected={r["id"] for r in self.selected_games()}
+        depth=max((i+1 for i,r in enumerate(self.model.rounds) if r["id"] in selected),default=0)
+        requested=self.history.count if self.history.mode=="latest" else depth or 20
+        return min(MAX_DETAILED_ROUNDS if shots else MAX_IMPORT_ROUNDS,max(1,requested,depth))
+
+    def empty_history(self,parent):
+        if not self.model.rounds:
+            self.empty(parent,"Your golf starts here.","Import saved scorecards or connect to Garmin. No sample performance is substituted.")
+        else:
+            frame=self.section(parent,"No games match this selection.","Choose different games or turn off the 18-hole-only filter to include imported 9-hole games.")
+            button(frame,"Choose games…",self.choose_games).pack(anchor="w",padx=18,pady=(0,18))
+
     def wrap_header(self, width, actions_width):
         available = max(260, width-actions_width-90)
         self.title_label.configure(wraplength=available, justify="left")
@@ -336,12 +453,17 @@ class GolfApp:
         self.page = key
         titles = {"overview": ("Your golf, at a glance.", "A clear picture from your saved scorecards."),
                   "improve": ("What to improve next.", "Visual priorities from your real rounds—not a swing diagnosis."),
-                  "rounds": ("Your latest three rounds.", "See what changed, hole by hole."),
+                  "rounds": ("Your games, over time.", "Selected-game trends, rolling averages and individual scorecards."),
                   "clubs": ("Which approaches cost you?", "Keep recent shot outcomes separate from aggregate club statistics."),
                   "game": ("Your complete scoring game.", "Driver and tee shots, putting, and wedges—with their different roles kept separate."),
                   "privacy": ("Your data. Your control.", "Private sign-in, local exports, and clear limits.")}
         self.title_label.configure(text=titles[key][0])
         self.subtitle.configure(text=titles[key][1])
+        self.refresh_history_controls()
+        if key=="privacy":
+            self.history_frame.pack_forget()
+        else:
+            self.history_frame.pack(fill="x",pady=(0,12),after=self.heading_frame)
         for name, item in self.nav.items():
             item.configure(bg="#244D3A" if name == key else NAVY, fg=WHITE if name == key else "#BCD0C3")
         for widget in self.scroll.body.winfo_children():
@@ -399,11 +521,24 @@ class GolfApp:
         tree._sort = (column, reverse)
 
     def render_overview(self, body):
-        metrics = self.model.metrics()
+        tabs=tk.Frame(body,bg=BG)
+        tabs.pack(fill="x",pady=(0,18))
+        def choose(tab):
+            self.overview_tab=tab
+            self.show_page("overview")
+        for key,title in (("summary","Selected-game overview"),("confidence","Club confidence")):
+            button(tabs,title,lambda k=key:choose(k),primary=self.overview_tab==key).pack(side="left",padx=(0,10))
+        if self.overview_tab=="confidence":
+            self.render_confidence(body)
+            return
+        selected=self.selected_games()
+        metrics=period_statistics(selected)
+        coaching=self.model.metrics(selected)
+        kind=metrics["scoring_holes"]
         self.metrics_row(body, [("Garmin handicap", fmt(self.model.user_stats.get("handicap")), "Garmin’s account summary"),
-                                ("Average score", fmt(metrics["average_score"]), f"{metrics['rounds']} imported 18-hole rounds"),
+                                (f"{kind}-hole average score", fmt(metrics["average_score"]), f"{metrics['scoring_games']} selected {kind}-hole games"),
                                 ("Greens in regulation", fmt(metrics["gir"], suffix="%"), "Weighted by recorded greens"),
-                                ("Putts per round", fmt(metrics["putts"]), "Recorded scorecard totals")])
+                                (f"Putts / {kind}-hole game", fmt(metrics["putts"]), "Selected scorecards; lengths not mixed")])
         chart_row = tk.Frame(body, bg=BG)
         chart_row.pack(fill="x", pady=(0, 18))
         chart_row.columnconfigure(0, weight=2)
@@ -411,23 +546,23 @@ class GolfApp:
         chart_card = card(chart_row)
         chart_card.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
         label(chart_card, "Score trend", 14, True).pack(anchor="w", padx=18, pady=(18, 4))
-        label(chart_card, "18-hole scores · courses and tees differ", 9, color=MUTED).pack(anchor="w", padx=18)
+        label(chart_card, f"Selected {kind}-hole scores · courses and tees differ", 9, color=MUTED).pack(anchor="w", padx=18)
         canvas = tk.Canvas(chart_card, bg=WHITE, height=300, highlightthickness=0)
         canvas.pack(fill="x", padx=10, pady=12)
         canvas.bind("<Configure>", lambda _: self.draw_chart(canvas))
         focus = card(chart_row)
         focus.grid(row=0, column=1, sticky="nsew")
         label(focus, "Your next scoring gains", 14, True).pack(anchor="w", padx=18, pady=(18, 12))
-        for headline, text in (("Control the long putt", f"{fmt(metrics['three_putts'])} three-putt-or-worse holes per full round. Verify tracking, then work on pace."),
-                               ("Keep the big number off", f"{fmt(metrics['big_holes'])} double-bogey-or-worse holes per round. Favor the safe recovery."),
-                               ("Check your approaches", "Review clubs by actual recent misses, with sample sizes and coverage shown.")):
+        for headline, text in (("Control the long putt", f"{fmt(coaching['three_putts'])} three-putt-or-worse holes per selected 18-hole game. Verify tracking, then work on pace."),
+                               ("Keep the big number off", f"{fmt(coaching['big_holes'])} double-bogey-or-worse holes per selected 18-hole game. Favor the safe recovery."),
+                               ("Check your club confidence", "Compare target hits, misses and sample sizes within the same shot role—not irons versus putts.")):
             label(focus, headline, 10, True).pack(anchor="w", padx=18, pady=(4, 3))
             label(focus, text, 9, color=MUTED, wraplength=310, justify="left").pack(anchor="w", padx=18, pady=(0, 9))
         button(focus, "Review approach clubs →", lambda: self.show_page("clubs")).pack(anchor="w", padx=18, pady=(4, 16))
-        label(body, "LATEST ROUNDS", 10, True, MUTED, BG).pack(anchor="w", pady=(3, 12))
+        label(body, f"RECENT GAMES IN THIS SELECTION · showing {min(3,len(selected))} of {len(selected)}", 10, True, MUTED, BG).pack(anchor="w", pady=(3, 12))
         latest = tk.Frame(body, bg=BG)
         latest.pack(fill="x", pady=(0, 18))
-        for i, r in enumerate(self.model.latest_three):
+        for i, r in enumerate(selected[:3]):
             latest.columnconfigure(i, weight=1, uniform="round")
             tile = card(latest)
             tile.grid(row=0, column=i, sticky="nsew", padx=(0, 12 if i < 2 else 0))
@@ -436,42 +571,100 @@ class GolfApp:
             line = tk.Frame(tile, bg=WHITE)
             line.pack(fill="x", padx=18, pady=10)
             label(line, fmt(r["score"], 0), 30, True).pack(side="left")
-            label(line, f"  {fmt(r['to_par'], 0)} over par · {r['holes_completed']} holes", 9, color=MUTED).pack(side="left")
+            label(line, f"  {fmt_delta(r['to_par'])} to par · {r['holes_completed']} holes", 9, color=MUTED).pack(side="left")
             label(tile, f"Greens {fmt(r['greens_hit'], 0)}/{fmt(r['greens_recorded'], 0)}    Putts {fmt(r['putts'], 0)}    Penalties {fmt(r['penalties'], 0)}", 9, color=MUTED).pack(anchor="w", padx=18)
             button(tile, "Review round", lambda rid=r["id"]: self.go_round(rid)).pack(anchor="w", padx=18, pady=16)
-        if not self.model.rounds:
-            self.empty(body, "Your golf starts here.", "Import a saved export or connect to Garmin using the button above.")
-        sample = f"{len(self.model.rounds)} imported scorecards; overview averages use {metrics['rounds']} complete 18-hole rounds only."
+        if not selected:
+            self.empty_history(body)
+        sample = f"{len(selected)} selected games: {metrics['full_rounds']} × 18 holes, {metrics['nine_rounds']} × 9 holes. Score and per-game putting averages use {kind}-hole games only; accuracy percentages use selected recorded holes."
         label(body, sample, 9, color=MUTED, bg=BG, wraplength=1100, justify="left").pack(anchor="w", pady=(0, 16))
+        button(body,"Explore all selected-game trends →",lambda:self.open_rounds("trends")).pack(anchor="w",pady=(0,18))
 
     def draw_chart(self, canvas):
-        canvas.delete("all")
-        data = list(reversed(self.model.full_rounds))
-        width, height = canvas.winfo_width(), max(220,canvas.winfo_height())
-        if width < 100:
-            return
-        if not data:
-            canvas.create_text(width/2, 100, text="Import rounds to see your score trend", fill=MUTED, font=(FONT, 11))
-            return
-        low = math_floor(min(x["score"] for x in data)-3, 5)
-        high = math_floor(max(x["score"] for x in data)+7, 5)
-        left, right, top, bottom = 40, width-28, 24, height-36
-        y_for = lambda score: bottom-(score-low)/(high-low)*(bottom-top)
-        for i in range(5):
-            value = low+(high-low)*i/4
-            y = y_for(value)
-            canvas.create_line(left, y, right, y, fill="#E9EEE8")
-            canvas.create_text(left-10, y, text=f"{value:.0f}", anchor="e", fill=MUTED, font=(FONT, 8))
-        points = [(left+(right-left)*i/max(1,len(data)-1), y_for(r["score"])) for i,r in enumerate(data)]
-        if len(points) > 1:
-            canvas.create_polygon([(left,bottom),*points,(right,bottom)], fill="#EAF5EE", outline="")
-            canvas.create_line(*[v for point in points for v in point], fill=GREEN, width=3)
-        for i, ((x,y), r) in enumerate(zip(points, data)):
-            canvas.create_oval(x-3,y-3,x+3,y+3,fill=GREEN,outline=WHITE,width=1)
-            if i in (0,len(data)//2,len(data)-1):
-                canvas.create_text(x,bottom+19,text=r["date"][5:],fill=MUTED,font=(FONT,8))
-        x,y = points[-1]
-        canvas.create_text(x,y-14,text=fmt(data[-1]["score"],0),fill=GREEN,font=(FONT,10,"bold"))
+        selected=self.selected_games()
+        kind=period_statistics(selected)["scoring_holes"]
+        draw_history_trend(canvas,trend_series(selected,"score"+str(kind)),self.rolling_window,self.go_round)
+
+    def render_confidence(self,body):
+        selected=self.selected_games()
+        controls=tk.Frame(body,bg=BG)
+        controls.pack(fill="x",pady=(0,16))
+        role=ttk.Combobox(controls,values=ROLES,state="readonly",width=24)
+        role.set(self.confidence_role)
+        role.pack(side="left",ipady=3)
+        sorting=ttk.Combobox(controls,values=("Evidence & sample","Most misses","Hit rate","Club name"),state="readonly",width=23)
+        sorting.set(self.confidence_sort)
+        sorting.pack(side="left",padx=10,ipady=3)
+        show_empty=tk.BooleanVar(value=self.confidence_show_empty)
+        def change(_=None):
+            self.confidence_role=role.get()
+            self.confidence_sort=sorting.get()
+            self.confidence_show_empty=show_empty.get()
+            self.show_page("overview")
+        role.bind("<<ComboboxSelected>>",change)
+        sorting.bind("<<ComboboxSelected>>",change)
+        ttk.Checkbutton(controls,text="Show clubs with no records",style="History.TCheckbutton",variable=show_empty,command=change).pack(side="left",padx=5)
+        report=club_confidence(self.model,selected,self.confidence_role,self.confidence_show_empty)
+        if self.confidence_sort=="Most misses":
+            report["rows"].sort(key=lambda r:(r["unassigned"],-r["misses"],-r["classified"]))
+        elif self.confidence_sort=="Hit rate":
+            report["rows"].sort(key=lambda r:(r["unassigned"],r["rate"] is None,-(r["rate"] or 0),-r["classified"]))
+        elif self.confidence_sort=="Club name":
+            report["rows"].sort(key=lambda r:(r["unassigned"],r["label"]))
+        label(body,f"Target hits: {report['hits']}     Misses: {report['misses']}     Unknown: {report['unknown']}     Clubs with 10+ records: {sum(r['enough'] for r in report['rows'])}",11,True,bg=BG,wraplength=1090,justify="left").pack(anchor="w",pady=(0,16))
+        frame=self.section(body,"Which clubs are working for you?",report["definition"]+" * marks a small sample (fewer than 10 classified records).")
+        chart(frame,lambda c:draw_club_confidence(c,report),height=max(160,78+43*len(report["rows"])))
+        strongest=report["strongest"]
+        if strongest:
+            explanation=f"Most consistency evidence among recorded outcomes: {strongest['label']} — {strongest['hits']}/{strongest['classified']} target hits ({strongest['rate']:.1f}%). This is not a recommendation to use that club for a different distance or lie."
+        else:
+            explanation=f"No named club has {MIN_CLASSIFIED_SHOTS} classified records in this role and period. Treat the counts as review signals, not a reliable confidence ranking."
+        label(frame,explanation,10,color=GREEN if strongest else AMBER,wraplength=1080,justify="left").pack(anchor="w",padx=18,pady=(0,14))
+        worst=report["most_misses"]
+        if worst:
+            label(frame,f"Most recorded misses: {worst['label']} — {worst['misses']} misses from {worst['classified']} classified outcomes. Usage and shot difficulty affect this count.",10,color=MUTED,wraplength=1080,justify="left").pack(anchor="w",padx=18,pady=(0,14))
+        coverage=f"Putting tracking: {report['putting_holes']}/{report['expected_holes']} selected holes." if self.confidence_role=="Putting" else f"Detailed-shot coverage: {report['shot_holes']}/{report['expected_holes']} selected holes."
+        label(frame,coverage+f" {report['unassigned']} records have no club assignment. Missing tracking can bias observed rates.",9,color=MUTED,wraplength=1080,justify="left").pack(anchor="w",padx=18,pady=(0,18))
+        table=self.section(body,"Hits, misses and sample sizes","Rate ranges are approximate 95% Wilson intervals for the recorded role, assuming broadly comparable shots. They are not psychological confidence, current-shot predictions, or evidence of positive EV.")
+        tree=self.tree(table,[("club","Club",180),("hits","Target hits",85),("miss","Misses",70),("unknown","Unknown",75),("n","Classified",85),("rate","Hit rate",85),("range","Rate range",125),("source","Evidence",170)],height=min(12,max(3,len(report["rows"]))))
+        for r in report["rows"]:
+            interval="—" if r["low"] is None else f"{r['low']:.0f}–{r['high']:.0f}%"
+            evidence="No records" if not r["records"] else "Unassigned" if r["unassigned"] else "Small sample (<10)" if not r["enough"] else "10+ classified records"
+            tree.insert("","end",iid=r["id"],values=(r["label"],r["hits"],r["misses"],r["unknown"],r["classified"],fmt(r["rate"],suffix="%"),interval,evidence),tags=("muted" if r["unassigned"] or not r["records"] else "highlight" if strongest and r["id"]==strongest["id"] else "",))
+        button(table,"Export club confidence comparison",lambda:self.export_table(tree,"selected-club-confidence.csv")).pack(anchor="w",padx=18,pady=(0,18))
+        candidates=[r for r in report["rows"] if not r["unassigned"] and r["records"]]
+        if candidates:
+            controls=self.section(body,"How is this club changing?","Hit-rate and miss-count trends use only the selected games. A game with no classified records is a gap, not a 0% hit rate. Miss counts also depend on how often you used the club.")
+            choices={}
+            for row in candidates:
+                name=row["label"]
+                suffix=2
+                while name in choices:
+                    name=f"{row['label']} ({suffix})"
+                    suffix+=1
+                choices[name]=row["id"]
+            if self.confidence_trend_club not in choices.values():
+                self.confidence_trend_club=(strongest or worst or candidates[0])["id"]
+            pick=ttk.Combobox(controls,values=list(choices),state="readonly",width=28)
+            pick.set(next(name for name,key in choices.items() if key==self.confidence_trend_club))
+            pick.pack(anchor="w",padx=18,pady=(0,16),ipady=3)
+            holder=tk.Frame(controls,bg=WHITE)
+            holder.pack(fill="x",padx=18,pady=(0,16))
+            def draw_club_trends(_=None):
+                self.confidence_trend_club=choices[pick.get()]
+                for child in holder.winfo_children():
+                    child.destroy()
+                history=club_history(self.model,selected,self.confidence_role,self.confidence_trend_club)
+                for i,series in enumerate(history.values()):
+                    holder.columnconfigure(i,weight=1,uniform="clubtrend")
+                    tile=tk.Frame(holder,bg=WHITE)
+                    tile.grid(row=0,column=i,sticky="nsew",padx=(0,14 if i==0 else 0))
+                    label(tile,series["label"],11,True).pack(anchor="w",pady=(0,8))
+                    chart(tile,lambda c,s=series:draw_history_trend(c,s,self.rolling_window,self.go_round),height=250,padx=0)
+                    label(tile,f"{len(series['points'])} games with classified outcomes; {series['missing']} without. Hover for per-game sample size.",8,color=MUTED,wraplength=450,justify="left").pack(anchor="w")
+            pick.bind("<<ComboboxSelected>>",draw_club_trends)
+            draw_club_trends()
+        label(body,"Compare clubs within the same shot role. Longer clubs face different distances and lies; a higher target-hit rate alone is not a lower expected score.",9,color=MUTED,bg=BG,wraplength=1100,justify="left").pack(anchor="w",pady=(0,18))
 
     def render_improve(self, body):
         views = tk.Frame(body,bg=BG)
@@ -482,29 +675,26 @@ class GolfApp:
         for key,title in (("dashboard","Visual dashboard"),("strategy","Course strategy"),("ev","Expected score / EV")):
             button(views,title,lambda k=key:choose_view(k),primary=self.improve_tab==key).pack(side="left",padx=(0,10))
         if self.improve_tab=="strategy":
-            self.strategy_view = StrategyView(body,self.model,self.strategy_state)
+            self.strategy_view = StrategyView(body,self.model,self.strategy_state,selected=self.selected_games())
             return
         if self.improve_tab=="ev":
             self.ev_view = ExpectedValueView(body,self.model,self.ev_state)
             return
         toolbar = tk.Frame(body,bg=BG)
         toolbar.pack(fill="x",pady=(0,16))
-        label(toolbar,"COMPARE",9,True,MUTED,BG).pack(side="left",padx=(0,12))
-        scope = ttk.Combobox(toolbar,values=("Latest 3 full rounds","All imported full rounds"),state="readonly",width=28)
-        scope.set(self.improvement_scope)
-        scope.pack(side="left",ipady=3)
-        def scope_changed(_):
-            self.improvement_scope = scope.get()
-            self.show_page("improve")
-        scope.bind("<<ComboboxSelected>>",scope_changed)
-        button(toolbar,"Review latest 3 rounds →",lambda: self.show_page("rounds")).pack(side="right")
+        label(toolbar,self.selected_description(),9,color=MUTED,bg=BG,wraplength=550).pack(side="left")
+        button(toolbar,"Review selected games →",lambda: self.open_rounds("trends")).pack(side="right")
         button(toolbar,"Full-game charts →",lambda:self.go_game()).pack(side="right",padx=10)
-        coaching = improvement_snapshot(self.model,self.improvement_scope=="Latest 3 full rounds")
+        coaching = improvement_snapshot(self.model,selected=self.selected_games())
         rounds, metrics = coaching["rounds"],coaching["metrics"]
         if not rounds:
-            self.empty(body,"Add your rounds to see a visual improvement plan.","The charts use recorded golf results, never sample or made-up performance data.")
+            if self.selected_games():
+                frame=self.section(body,"These starter goals use complete 18-hole games.","Your selection has no complete 18-hole games. Nine-hole games remain available in Rounds & trends, scorecards and per-hole statistics.")
+                button(frame,"Open selected-game trends",lambda:self.open_rounds("trends")).pack(anchor="w",padx=18,pady=(0,18))
+            else:
+                self.empty_history(body)
             return
-        sample = f"{len(rounds)} complete 18-hole rounds · {pretty_date(rounds[-1]['date'])} to {pretty_date(rounds[0]['date'])}"
+        sample = f"Practice goals: {len(rounds)} complete 18-hole games · {pretty_date(rounds[-1]['date'])} to {pretty_date(rounds[0]['date'])}. Shot charts use all selected games."
         label(body,sample,9,color=MUTED,bg=BG).pack(anchor="w",pady=(0,14))
         self.metrics_row(body,[("Scoring average",fmt(metrics["average_score"]),"Gross scores; courses and tees differ"),
                                ("Greens in regulation",fmt(metrics["gir"],suffix="%"),"Recorded greens, weighted by holes"),
@@ -533,9 +723,9 @@ class GolfApp:
         if top:
             label(approach_card,f"{top['label']}: {top['miss']} off-green finishes from {top['approaches']} recorded approaches. This identifies a review target, not proof of a bad club.",10,color=INK,wraplength=470,justify="left").pack(anchor="w",padx=18,pady=(0,10))
         label(approach_card,f"COVERAGE {analysis['shot_holes']}/{analysis['expected_holes']} holes · {analysis['unassigned']} unassigned clubs · {analysis['unknown_outcomes']} unknown outcome(s). Missing data is never counted as a miss.",9,color=AMBER if analysis["shot_holes"]<analysis["expected_holes"] else MUTED,wraplength=470,justify="left").pack(anchor="w",padx=18,pady=(0,12))
-        button(approach_card,"Open latest 3 shot comparison →",lambda:self.go_approaches()).pack(anchor="w",padx=18,pady=(0,18))
+        button(approach_card,"Open selected-game shot comparison →",lambda:self.go_approaches()).pack(anchor="w",padx=18,pady=(0,18))
         label(pattern_card,"Where do you miss the green?",14,True).pack(anchor="w",padx=18,pady=(18,5))
-        label(pattern_card,"Garmin’s aggregate direction categories—not restricted to these latest rounds.",9,color=MUTED,wraplength=470,justify="left").pack(anchor="w",padx=18,pady=(0,8))
+        label(pattern_card,"Garmin’s aggregate direction categories—not restricted to the selected games.",9,color=MUTED,wraplength=470,justify="left").pack(anchor="w",padx=18,pady=(0,8))
         aggregate = self.model.aggregate_clubs(include_retired=True)
         choices = {}
         for row in aggregate:
@@ -579,7 +769,6 @@ class GolfApp:
 
     def go_game(self, tab="tee"):
         self.game_tab = tab
-        self.game_scope = self.improvement_scope
         self.show_page("game")
 
     def go_strategy(self, phase="tee", club_id=None):
@@ -592,14 +781,8 @@ class GolfApp:
     def render_game(self, body):
         tools = tk.Frame(body,bg=BG)
         tools.pack(fill="x",pady=(0,16))
-        scope = ttk.Combobox(tools,values=("Latest 3 full rounds","All imported full rounds"),state="readonly",width=28)
-        scope.set(self.game_scope)
-        scope.pack(side="left",ipady=3)
-        def scope_changed(_):
-            self.game_scope = scope.get()
-            self.show_page("game")
-        scope.bind("<<ComboboxSelected>>",scope_changed)
-        button(tools,"Get latest 3 shot details",lambda:self.open_sync(rounds=3,shots=True)).pack(side="right")
+        label(tools,self.selected_description(),9,color=MUTED,bg=BG,wraplength=530).pack(side="left")
+        button(tools,"Update detailed shots",lambda:self.open_sync(rounds=self.recommended_import_count(True),shots=True)).pack(side="right")
         button(tools,"Plan the next shot →",lambda:self.go_strategy({"tee":"tee","putting":"putting","wedges":"wedge"}[self.game_tab])).pack(side="right",padx=10)
         tabs = tk.Frame(body,bg=BG)
         tabs.pack(fill="x",pady=(0,18))
@@ -608,12 +791,12 @@ class GolfApp:
             self.show_page("game")
         for key,title in (("tee","Tee shots & driver"),("putting","Putting"),("wedges","Wedges")):
             button(tabs,title,lambda k=key:choose_tab(k),primary=self.game_tab==key).pack(side="left",padx=(0,10))
-        selected = self.model.full_rounds[:3] if self.game_scope=="Latest 3 full rounds" else self.model.full_rounds
+        selected = self.selected_games()
         if not selected:
-            self.empty(body,"Import rounds to see your full-game charts.","Putting uses scorecards. Club-specific tee and wedge charts need optional detailed shot data.")
+            self.empty_history(body)
             return
         game = full_game_snapshot(self.model,selected)
-        label(body,f"{len(selected)} complete 18-hole rounds · shot coverage {game['shot_holes']}/{game['expected_holes']} holes. Missing shot data is not treated as a failed shot.",9,color=MUTED,bg=BG,wraplength=1090).pack(anchor="w",pady=(0,16))
+        label(body,f"{len(selected)} selected games · shot coverage {game['shot_holes']}/{game['expected_holes']} holes. Missing shot data is not treated as a failed shot.",9,color=MUTED,bg=BG,wraplength=1090).pack(anchor="w",pady=(0,16))
         if self.game_tab=="tee":
             self.render_tee(body,game)
         elif self.game_tab=="putting":
@@ -638,7 +821,7 @@ class GolfApp:
         button(detail,"Export tee comparison",lambda:self.export_table(tree,"tee-clubs.csv")).pack(anchor="w",padx=18,pady=(0,18))
 
     def render_putting(self, body, game):
-        self.metrics_row(body,[("Putts per round",fmt(game["average_putts"]),"Official scorecard totals"),
+        self.metrics_row(body,[(f"Putts / {game['average_putts_holes']}-hole game",fmt(game["average_putts"]),"Selected scorecards; lengths not mixed"),
                                ("Putts / tracked hole",fmt(game["putts_per_tracked_hole"],2),"Uses only holes with recorded putts"),
                                ("Three-putt+ holes",fmt(game["three_putts_per_full_round"]),"Per full round with complete tracking"),
                                ("Putting coverage",f"{game['tracked_putting_holes']} / {game['expected_holes']}","Scorecard holes with putt counts")])
@@ -650,7 +833,7 @@ class GolfApp:
         history.grid(row=0,column=0,sticky="nsew",padx=(0,14))
         drill.grid(row=0,column=1,sticky="nsew")
         label(history,"Three-putts to work on",14,True).pack(anchor="w",padx=18,pady=(18,6))
-        label(history,"Latest six selected rounds at most. Goal: two or fewer three-putt+ holes.",9,color=MUTED,wraplength=470,justify="left").pack(anchor="w",padx=18,pady=(0,8))
+        label(history,f"All selected {game['average_putts_holes']}-hole games, oldest to newest. Other lengths remain in the table; the ≤2 starter goal applies to 18-hole games only.",9,color=MUTED,wraplength=470,justify="left").pack(anchor="w",padx=18,pady=(0,8))
         chart(history,lambda c:draw_putting_bars(c,game["putting"]),height=300)
         label(history,"* means incomplete tracking or a non-18-hole sample, not a directly comparable full round.",9,color=MUTED,wraplength=470,justify="left").pack(anchor="w",padx=18,pady=(0,18))
         label(drill,"A simple distance-control drill",14,True).pack(anchor="w",padx=18,pady=(18,6))
@@ -683,21 +866,37 @@ class GolfApp:
 
     def go_round(self, rid):
         self.selected_round = rid
+        self.rounds_tab="scorecards"
+        self.show_page("rounds")
+
+    def open_rounds(self,tab="trends"):
+        self.rounds_tab=tab
         self.show_page("rounds")
 
     def render_rounds(self, body):
-        rounds = self.model.latest_three
-        greens = sum(r["greens_hit"] or 0 for r in rounds)
-        total = sum(r["greens_recorded"] or 0 for r in rounds)
+        self.trend_charts={}
+        tabs=tk.Frame(body,bg=BG)
+        tabs.pack(fill="x",pady=(0,18))
+        for key,title in (("trends","Trend charts"),("scorecards","Scorecards")):
+            button(tabs,title,lambda k=key:self.open_rounds(k),primary=self.rounds_tab==key).pack(side="left",padx=(0,10))
+        rounds = self.selected_games()
+        if not rounds:
+            self.empty_history(body)
+            return
+        stats=period_statistics(rounds)
+        kind=stats["scoring_holes"]
         coverage = self.model.approach_analysis(rounds)
-        self.metrics_row(body, [("Latest round average", fmt(average([r["score"] for r in rounds])), "Gross scores; check course par"),
-                                ("Greens in regulation", fmt(percent(greens,total),suffix="%"), f"{greens} of {total} recorded greens"),
-                                ("Putts per round", fmt(average([r["putts"] for r in rounds])), "Latest three scorecards"),
+        if self.rounds_tab=="trends":
+            self.render_trends(body,rounds)
+            return
+        self.metrics_row(body, [(f"{kind}-hole score average", fmt(stats["average_score"]), f"{stats['scoring_games']} selected {kind}-hole games"),
+                                ("Greens in regulation", fmt(stats["gir"],suffix="%"), "All selected recorded greens"),
+                                (f"Putts / {kind}-hole game", fmt(stats["putts"]), "Selected scorecards; lengths not mixed"),
                                 ("Shot-data coverage", f"{coverage['shot_holes']} / {coverage['expected_holes']}", "Holes with detailed shot records")])
         frame = self.section(body, "Round comparison", "Select a round below to review its scorecard. Recorded penalties may have missing entries.")
-        tree = self.tree(frame, [("date","Date",105),("course","Course",300),("score","Score",65),("gir","Greens",80),("fw","Fairways",80),("putts","Putts",65),("pen","Pen.",60),("shots","Shot holes",80)], height=3)
+        tree = self.tree(frame, [("date","Date",105),("course","Course",300),("holes","Holes",55),("score","Score",90),("gir","Greens",80),("fw","Fairways",80),("putts","Putts",65),("pen","Pen.",60),("shots","Shot holes",80)], height=min(10,max(3,len(rounds))))
         for r in rounds:
-            tree.insert("", "end", iid=r["id"], values=(pretty_date(r["date"]),r["course"],f"{fmt(r['score'],0)} (+{fmt(r['to_par'],0)})",f"{fmt(r['greens_hit'],0)}/{fmt(r['greens_recorded'],0)}",f"{fmt(r['fairways_hit'],0)}/{fmt(r['fairways_recorded'],0)}",fmt(r["putts"],0),fmt(r["penalties"],0),f"{r['shot_holes']}/{r['holes_completed']}"))
+            tree.insert("", "end", iid=r["id"], values=(pretty_date(r["date"]),r["course"],r["holes_completed"],f"{fmt(r['score'],0)} ({fmt_delta(r['to_par'])})",f"{fmt(r['greens_hit'],0)}/{fmt(r['greens_recorded'],0)}",f"{fmt(r['fairways_hit'],0)}/{fmt(r['fairways_recorded'],0)}",fmt(r["putts"],0),fmt(r["penalties"],0),f"{r['shot_holes']}/{r['holes_completed']}"))
         detail = tk.Frame(body, bg=BG)
         detail.pack(fill="x")
         def select(_=None):
@@ -712,7 +911,51 @@ class GolfApp:
             tree.selection_set(selected)
             self.render_scorecard(detail, next(r for r in rounds if r["id"] == selected))
         else:
-            self.empty(body, "No scorecards yet.", "Connect or import a golf export to review your latest rounds.")
+            self.empty_history(body)
+
+    def render_trends(self,body,rounds):
+        controls=tk.Frame(body,bg=BG)
+        controls.pack(fill="x",pady=(0,16))
+        label(controls,"ROLLING AVERAGE",9,True,MUTED,BG).pack(side="left",padx=(0,10))
+        rolling=ttk.Combobox(controls,values=("Off","3 games","5 games","10 games","20 games"),state="readonly",width=15)
+        rolling.set(f"{self.rolling_window} games" if self.rolling_window else "Off")
+        rolling.pack(side="left",ipady=3)
+        def change(_):
+            self.rolling_window=0 if rolling.get()=="Off" else int(rolling.get().split()[0])
+            self.show_page("rounds")
+        rolling.bind("<<ComboboxSelected>>",change)
+        label(body,self.selected_description()+". Charts run oldest to newest. A rolling mean needs a complete window of recorded selected games; it never fills missing values with zero.",9,color=MUTED,bg=BG,wraplength=1090,justify="left").pack(anchor="w",pady=(0,15))
+        self.trend_charts={}
+        grid=None
+        for i,key in enumerate(default_trend_keys(rounds)):
+            if i%2==0:
+                grid=tk.Frame(body,bg=BG)
+                grid.pack(fill="x",pady=(0,18))
+                grid.columnconfigure(0,weight=1,uniform="trend")
+                grid.columnconfigure(1,weight=1,uniform="trend")
+            series=trend_series(rounds,key)
+            tile=card(grid)
+            tile.grid(row=0,column=i%2,sticky="nsew",padx=(0,14 if i%2==0 else 0))
+            label(tile,series["label"],13,True).pack(anchor="w",padx=18,pady=(16,5))
+            mean_label="pooled rate" if series["unit"]=="%" or key=="putts_per_hole" else "game mean"
+            label(tile,f"{len(series['points'])} recorded games · {mean_label} {fmt(series['average'],2)} {series['unit']}",9,color=MUTED).pack(anchor="w",padx=18,pady=(0,7))
+            canvas=chart(tile,lambda c,s=series:draw_history_trend(c,s,self.rolling_window,self.go_round),height=250)
+            self.trend_charts[key]=canvas
+            if series["change"] is None:
+                comparison="At least two recorded values in each half are needed for an older-versus-newer comparison."
+            else:
+                unit="percentage points" if series["unit"]=="%" else series["unit"]
+                direction="lower" if series["change"]<0 else "higher" if series["change"]>0 else "unchanged"
+                comparison=f"Recent half {abs(series['change']):.2f} {unit} {direction} than older half ({fmt(series['older_average'],2)} → {fmt(series['newer_average'],2)})." if round(series["change"],2)!=0 else f"Older and recent half means are effectively unchanged ({fmt(series['older_average'],2)} → {fmt(series['newer_average'],2)})."
+            label(tile,comparison,9,color=GREEN if series["improving"] else MUTED,wraplength=470,justify="left").pack(anchor="w",padx=18,pady=(0,9))
+            detail=f"{series['missing']} missing metric value(s); {series['excluded']} other-length game(s) excluded. Click a chart point to open its scorecard."
+            label(tile,detail,8,color=MUTED,wraplength=470,justify="left").pack(anchor="w",padx=18,pady=(0,16))
+        label(body,"These are descriptive trends, not proof of a swing or handicap change. Courses, tees, conditions and the games you chose can differ. Nine- and 18-hole gross scores are never averaged together.",9,color=MUTED,bg=BG,wraplength=1090,justify="left").pack(anchor="w",pady=(0,18))
+        frame=self.section(body,"Selected-game trend data","Export the exact selected games, in chronological order, for your own analysis.")
+        tree=self.tree(frame,[("date","Date",105),("course","Course",250),("holes","Holes",60),("score","Score",70),("gir","GIR %",85),("fw","FW %",85),("putts","Putts",70),("pen","Recorded pen.",110)],height=min(10,max(3,len(rounds))))
+        for r in reversed(rounds):
+            tree.insert("","end",iid=r["id"],values=(r["date"],r["course"],r["holes_completed"],fmt(r["score"],0),fmt(percent(r["greens_hit"],r["greens_recorded"])),fmt(percent(r["fairways_hit"],r["fairways_recorded"])),fmt(r["putts"],0),fmt(r["penalties"],0)))
+        button(frame,"Export selected-game trends",lambda:self.export_table(tree,"selected-game-trends.csv")).pack(anchor="w",padx=18,pady=(0,18))
 
     def render_scorecard(self, parent, r):
         for child in parent.winfo_children():
@@ -747,30 +990,30 @@ class GolfApp:
 
     def go_approaches(self, rid=None):
         self.approach_round = rid
-        self.approach_mode = "Latest three · shot data"
+        self.approach_mode = "Selected games · shot data"
         self.show_page("clubs")
 
     def render_clubs(self, body):
         toolbar = tk.Frame(body,bg=BG)
         toolbar.pack(fill="x",pady=(0,16))
-        mode = ttk.Combobox(toolbar,values=("Latest three · shot data","Garmin aggregate club stats"),state="readonly",width=28)
+        mode = ttk.Combobox(toolbar,values=("Selected games · shot data","Garmin aggregate club stats"),state="readonly",width=28)
         mode.set(self.approach_mode)
         mode.pack(side="left",ipady=3)
         def mode_changed(_):
             self.approach_mode = mode.get()
             self.show_page("clubs")
         mode.bind("<<ComboboxSelected>>",mode_changed)
-        button(toolbar,"Get latest 3 shot details",lambda: self.open_sync(rounds=3,shots=True)).pack(side="right")
+        button(toolbar,"Update detailed shots",lambda: self.open_sync(rounds=self.recommended_import_count(True),shots=True)).pack(side="right")
         if self.approach_mode == "Garmin aggregate club stats":
             self.render_aggregate_clubs(body)
             return
-        rounds = self.model.latest_three
+        rounds = self.selected_games()
         selected = [r for r in rounds if r["id"] == self.approach_round] if self.approach_round else rounds
         if not selected:
             selected, self.approach_round = rounds, None
-        choices = {"All latest three rounds": None, **{f"{r['date']} · {r['course']}":r["id"] for r in rounds}}
+        choices = {"All selected games": None, **{f"{r['date']} · {r['course']}":r["id"] for r in rounds}}
         choice = ttk.Combobox(toolbar,values=list(choices),state="readonly",width=25)
-        choice.set(next((k for k,v in choices.items() if v == self.approach_round),"All latest three rounds"))
+        choice.set(next((k for k,v in choices.items() if v == self.approach_round),"All selected games"))
         choice.pack(side="left",padx=10,ipady=3)
         choice.bind("<<ComboboxSelected>>",lambda _: self.select_approach_round(choices[choice.get()]))
         analysis = self.model.approach_analysis(selected)
@@ -798,14 +1041,14 @@ class GolfApp:
         for i,row in enumerate(analysis["shots"]):
             shot_tree.insert("","end",iid=str(i),values=(row["date"],row["hole"],row["club"],row["start_lie"],row["end_lie"],{"green":"On green","miss":"Off green","unknown":"Unknown"}[row["outcome"]],fmt(row["meters"]/0.9144 if row["meters"] is not None else None,0)),tags=("highlight" if row["outcome"]=="green" else "caution" if row["outcome"]=="unknown" else "",))
         if not analysis["shots"]:
-            label(shots_frame,"No detailed approaches in this export yet. Use ‘Get latest 3 shot details’ to import them through the app.",10,color=MUTED,wraplength=1080).pack(anchor="w",padx=18,pady=(0,18))
+            label(shots_frame,"No detailed approaches for this selection yet. Use ‘Update detailed shots’ to choose an import window; locations remain optional until you confirm the import.",10,color=MUTED,wraplength=1080).pack(anchor="w",padx=18,pady=(0,18))
 
     def select_approach_round(self, rid):
         self.approach_round = rid
         self.show_page("clubs")
 
     def render_aggregate_clubs(self, body):
-        frame = self.section(body,"Garmin’s aggregate club summary","These percentages are not limited to your latest three rounds. Total tracked shots are NOT the number of approach attempts.")
+        frame = self.section(body,"Garmin’s aggregate club summary","These percentages are not restricted to your selected games. Total tracked shots are NOT the number of approach attempts.")
         tree = self.tree(frame,[("club","Club",200),("hit","Green hit",85),("short","Short",80),("long","Long",80),("left","Left",80),("right","Right",80),("all","All tracked shots",125)],height=12)
         for row in self.model.aggregate_clubs():
             tree.insert("","end",iid=row["id"],values=(row["label"],fmt(row["green_percent"],suffix="%"),fmt(row["short"],suffix="%"),fmt(row["long"],suffix="%"),fmt(row["left"],suffix="%"),fmt(row["right"],suffix="%"),fmt(row["all_shots"],0)))
@@ -910,7 +1153,10 @@ class GolfApp:
         os.startfile(self.export_dir)
 
     def reload_data(self, preferred=None):
+        previous=self.model.account_identities
         self.model = load_snapshot(self.export_dir,self.local_labels,preferred)
+        if previous!=self.model.account_identities:
+            self.history=load_selection(self.data_dir/"round-selection.json",self.model.account_identities)
         self.show_page(self.page)
         self.status.set(f"Loaded {len(self.model.rounds)} scorecards from {len(self.model.sources)} compatible local export(s).")
         self.refresh_session_status()
@@ -931,9 +1177,10 @@ class GolfApp:
             except SessionStoreError as exc:
                 messagebox.showerror("Could not forget sign-in",str(exc),parent=self.root)
 
-    def open_sync(self, rounds=20, shots=False, force_fresh=False, email_hint=""):
+    def open_sync(self, rounds=None, shots=False, force_fresh=False, email_hint=""):
         if self.busy:
             return
+        rounds=self.recommended_import_count(shots) if rounds is None else rounds
         dialog = SyncDialog(self.root,self.store.exists,rounds,shots,email_hint,force_fresh)
         self.root.wait_window(dialog)
         options = dialog.result
@@ -946,6 +1193,7 @@ class GolfApp:
         self.cancel = threading.Event()
         self.last_options = {k:v for k,v in options.items() if k != "credentials"}
         self.sync_button.configure(state="disabled")
+        self.refresh_history_controls()
         self.progress_frame.pack(fill="x",before=self.scroll,pady=(0,8))
         self.progress_label.configure(text="Preparing a private golf update…")
         self.progress_bar.start(12)
@@ -983,6 +1231,7 @@ class GolfApp:
         self.progress_bar.stop()
         self.progress_frame.pack_forget()
         self.sync_button.configure(state="normal")
+        self.refresh_history_controls()
         self.refresh_session_status()
 
     def drain_events(self):
@@ -1086,7 +1335,7 @@ def main():
                 user.SetForegroundWindow(ctypes.c_void_p(handle))
             return
     try:
-        GolfApp(initial_page="improve").run()
+        GolfApp(initial_page="overview").run()
     finally:
         if mutex:
             kernel.CloseHandle.argtypes = [ctypes.c_void_p]

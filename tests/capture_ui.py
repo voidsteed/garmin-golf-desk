@@ -11,6 +11,8 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE))
 from golf_app import GolfApp
+from golf_history_ui import RoundPicker
+from golf_history import RoundSelection
 
 
 class Header(ctypes.Structure):
@@ -83,8 +85,13 @@ def main():
     failures = []
     app.root.report_callback_exception = lambda kind,value,tb: failures.append(kind.__name__)
     try:
-        screens = [("improve","improve"),("strategy","improve"),("ev","improve"),("overview","overview"),("rounds","rounds"),("clubs","clubs"),("tee","game"),("putting","game"),("wedges","game"),("privacy","privacy")]
+        screens = [("improve","improve"),("strategy","improve"),("ev","improve"),("overview","overview"),("confidence","overview"),("confidence-tee","overview"),("confidence-putting","overview"),("rounds","rounds"),("scorecards","rounds"),("clubs","clubs"),("tee","game"),("putting","game"),("wedges","game"),("privacy","privacy")]
         for filename,page in screens:
+            if page=="overview":
+                app.overview_tab="confidence" if filename.startswith("confidence") else "summary"
+                app.confidence_role="Tee fairways" if filename=="confidence-tee" else "Putting" if filename=="confidence-putting" else "Approaches"
+            if page=="rounds":
+                app.rounds_tab="scorecards" if filename=="scorecards" else "trends"
             if page=="improve":
                 app.improve_tab = "strategy" if filename=="strategy" else "ev" if filename=="ev" else "dashboard"
             if page=="game":
@@ -93,6 +100,11 @@ def main():
             app.root.update_idletasks()
             app.root.update()
             capture(app.root,args.out/(filename+".png"))
+            if filename in ("confidence","rounds"):
+                app.scroll.canvas.yview_moveto(1)
+                app.root.update_idletasks()
+                app.root.update()
+                capture(app.root,args.out/(filename+"-details.png"))
             if filename=="improve":
                 for fraction,suffix in ((0.42,"details"),(1.0,"holes")):
                     app.scroll.canvas.yview_moveto(fraction)
@@ -108,6 +120,19 @@ def main():
                 app.root.update_idletasks()
                 app.root.update()
                 capture(app.root,args.out/"ev-example.png")
+        previous=app.history
+        app.history=RoundSelection(count=30,full_only=previous.full_only)
+        app.overview_tab="summary"
+        app.show_page("overview")
+        app.root.update_idletasks()
+        app.root.update()
+        capture(app.root,args.out/"last-30-games.png")
+        app.history=previous
+        picker=RoundPicker(app.root,app.model,app.history)
+        app.root.update_idletasks()
+        app.root.update()
+        capture(picker,args.out/"choose-games.png")
+        picker.cancel()
         if failures:
             raise RuntimeError("An interface callback failed")
         print("All dashboard pages, game tabs and chart details rendered and were captured without signing in.")

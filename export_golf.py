@@ -27,6 +27,9 @@ from garminconnect import (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+MAX_IMPORT_ROUNDS = 1000
+MAX_DETAILED_ROUNDS = 100
+SUMMARY_PAGE_SIZE = 100
 SENSITIVE_KEYS = frozenset(
     {
         "password", "passwd", "authorization", "cookie", "setcookie",
@@ -163,8 +166,10 @@ def collect_golf(
     delay_seconds: float = 0.75,
 ) -> dict[str, Any]:
     """Request only golf reads, with bounded rounds and fail-fast rate limits."""
-    if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= 100:
-        raise ValueError("rounds must be an integer from 1 through 100")
+    if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= MAX_IMPORT_ROUNDS:
+        raise ValueError(f"rounds must be an integer from 1 through {MAX_IMPORT_ROUNDS}")
+    if include_shots and rounds>MAX_DETAILED_ROUNDS:
+        raise ValueError(f"Detailed-shot imports are limited to {MAX_DETAILED_ROUNDS} rounds at a time; import scorecards without shots for a larger history.")
     result: dict[str, Any] = {
         "schema_version": 1,
         "exported_at_utc": datetime.now(UTC).isoformat(),
@@ -201,13 +206,40 @@ def collect_golf(
     try:
         result["golf"]["user_stats"] = fetch("overall golf stats", api.get_golf_user_stats)
         result["golf"]["club_stats"] = fetch("club stats", api.get_golf_club_stats)
-        summary = fetch("recent round summaries", api.get_golf_summary, start=0, limit=rounds)
-        try:
-            cards = scorecard_list(summary)[:rounds]
-        except (ValueError, TypeError) as exc:
-            result["errors"].append(problem_for("recent round summaries", exc))
-            cards = []
-        result["golf"]["scorecard_summaries"] = cards
+        cards = result["golf"]["scorecard_summaries"]
+        summary_ids: set[str] = set()
+        offset = 0
+        previous_page = None
+        while offset<rounds:
+            limit = min(SUMMARY_PAGE_SIZE,rounds-offset)
+            summary = fetch("recent round summaries", api.get_golf_summary, start=offset, limit=limit)
+            try:
+                page = scorecard_list(summary)[:limit]
+            except (ValueError,TypeError) as exc:
+                result["errors"].append(problem_for("recent round summaries",exc))
+                break
+            if not page:
+                break
+            fingerprint = json.dumps(page,sort_keys=True)
+            if fingerprint==previous_page:
+                result["errors"].append({"section":"recent round summaries","code":"pagination_stalled","message":"Garmin repeated a summary page; further paging stopped without duplicating rounds."})
+                break
+            previous_page = fingerprint
+            added = 0
+            for item in page:
+                key = scorecard_id(item)
+                if key is not None and key in summary_ids:
+                    continue
+                if key is not None:
+                    summary_ids.add(key)
+                cards.append(item)
+                added += 1
+            offset += len(page)
+            if not added:
+                result["errors"].append({"section":"recent round summaries","code":"pagination_stalled","message":"Garmin returned no new summary IDs; further paging stopped without duplicating rounds."})
+                break
+            if len(page)<limit:
+                break
 
         seen: set[str] = set()
         for index, card in enumerate(cards, 1):
@@ -269,18 +301,20 @@ def round_count(value: str) -> int:
     try:
         number = int(value)
     except ValueError:
-        raise argparse.ArgumentTypeError("Choose a round count from 1 through 100.") from None
-    if not 1 <= number <= 100:
-        raise argparse.ArgumentTypeError("Choose a round count from 1 through 100.")
+        raise argparse.ArgumentTypeError(f"Choose a round count from 1 through {MAX_IMPORT_ROUNDS}.") from None
+    if not 1 <= number <= MAX_IMPORT_ROUNDS:
+        raise argparse.ArgumentTypeError(f"Choose a round count from 1 through {MAX_IMPORT_ROUNDS}.")
     return number
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rounds", type=round_count, default=20, help="Recent rounds to request (1-100; default: 20).")
+    parser.add_argument("--rounds", type=round_count, default=20, help=f"Recent scorecards to request (1-{MAX_IMPORT_ROUNDS}; default: 20). Detailed shots are limited to {MAX_DETAILED_ROUNDS} rounds.")
     parser.add_argument("--include-shots", action="store_true", help="Also export detailed shots, which may include GPS positions.")
     parser.add_argument("--output-dir", type=Path, default=BASE_DIR / "exports", help="Folder for new JSON exports.")
     args = parser.parse_args(argv)
+    if args.include_shots and args.rounds>MAX_DETAILED_ROUNDS:
+        parser.error(f"Detailed-shot imports are limited to {MAX_DETAILED_ROUNDS} rounds. Omit --include-shots to import a larger scorecard history.")
 
     # Do not let third-party debug/error logging expose authentication details.
     logging.disable(logging.CRITICAL)

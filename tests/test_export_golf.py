@@ -81,6 +81,42 @@ class ScorecardTests(unittest.TestCase):
 
 
 class CollectionTests(unittest.TestCase):
+    def test_thirty_scorecards_can_be_requested(self):
+        api=FakeGolf([{"id":i} for i in range(1,31)])
+        result=collect(api,rounds=30)
+        self.assertEqual(len(result["golf"]["scorecards"]),30)
+        self.assertIn(("summary",0,30),api.calls)
+
+    def test_large_history_is_paginated_in_hundred_card_pages(self):
+        api=FakeGolf()
+        cards=[{"id":i} for i in range(1,251)]
+        api.get_golf_summary=Mock(side_effect=[cards[:100],cards[100:200],cards[200:]])
+        result=collect(api,rounds=250)
+        self.assertEqual(len(result["golf"]["scorecard_summaries"]),250)
+        self.assertEqual(len(result["golf"]["scorecards"]),250)
+        self.assertEqual([c.kwargs for c in api.get_golf_summary.call_args_list],[{"start":0,"limit":100},{"start":100,"limit":100},{"start":200,"limit":50}])
+
+    def test_rate_limit_while_paging_preserves_already_read_summaries(self):
+        api=FakeGolf()
+        api.get_golf_summary=Mock(side_effect=[[{"id":i} for i in range(1,101)],GarminConnectTooManyRequestsError("private")])
+        result=collect(api,rounds=200)
+        self.assertEqual(len(result["golf"]["scorecard_summaries"]),100)
+        self.assertTrue(result["stopped_early"])
+        self.assertEqual(result["golf"]["scorecards"],[])
+
+    def test_repeated_page_stops_without_duplicating_history(self):
+        api=FakeGolf()
+        page=[{"id":i} for i in range(1,101)]
+        api.get_golf_summary=Mock(side_effect=[page,page])
+        result=collect(api,rounds=200)
+        self.assertEqual(len(result["golf"]["scorecard_summaries"]),100)
+        self.assertEqual(result["errors"][0]["code"],"pagination_stalled")
+        self.assertEqual(api.get_golf_summary.call_count,2)
+
+    def test_large_detailed_import_is_bounded(self):
+        with self.assertRaises(ValueError):
+            collect(FakeGolf(),rounds=101,include_shots=True)
+
     def test_installed_library_methods_use_only_golf_read_endpoints(self):
         api = exporter.Garmin(retry_attempts=0)
         api.client.connectapi = Mock(side_effect=[
@@ -107,7 +143,7 @@ class CollectionTests(unittest.TestCase):
     def test_round_count_is_bounded_and_duplicates_are_not_downloaded_twice(self):
         api = FakeGolf([{"id": 1}, {"id": 1}, {"id": 2}, {"id": 3}])
         result = collect(api, rounds=3)
-        self.assertEqual(len(result["golf"]["scorecard_summaries"]), 3)
+        self.assertEqual(len(result["golf"]["scorecard_summaries"]), 2)
         self.assertEqual([x["scorecard_id"] for x in result["golf"]["scorecards"]], ["1", "2"])
         self.assertNotIn(("scorecard", "3"), api.calls)
 
@@ -169,7 +205,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(result["errors"][0]["code"], "unexpected_response")
 
     def test_round_bounds_cannot_be_bypassed_programmatically(self):
-        for value in (0, -1, 101, True, 1.5):
+        for value in (0, -1, 1001, True, 1.5):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 collect(FakeGolf(), rounds=value)
 
@@ -253,7 +289,7 @@ class FileAndArgumentTests(unittest.TestCase):
 
     def test_round_count_parser(self):
         self.assertEqual(exporter.round_count("20"), 20)
-        for value in ("0", "101", "not-a-number"):
+        for value in ("0", "1001", "not-a-number"):
             with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
                 exporter.round_count(value)
 

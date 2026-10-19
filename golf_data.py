@@ -140,6 +140,7 @@ class GolfSnapshot:
     source_errors: list[dict[str, str]] = field(default_factory=list)
     latest_import: str = ""
     skipped_files: int = 0
+    account_identities: frozenset[str] = frozenset()
 
     @property
     def full_rounds(self) -> list[dict[str, Any]]:
@@ -203,10 +204,16 @@ class GolfSnapshot:
         shot_holes = sum(r["shot_holes"] for r in rounds)
         expected_holes = sum(r["holes_completed"] or 0 for r in rounds)
         for round_ in rounds:
+            seen=set()
             for hole in round_["shots"].get("holeShots", []):
                 for shot in hole.get("shots", []):
                     if not isinstance(shot, dict) or shot.get("shotType") != "APPROACH" or shot.get("excludeFromStats") or shot.get("autoShotType") not in (None, "USED"):
                         continue
+                    shot_id=shot.get("id")
+                    if isinstance(shot_id,(int,str)):
+                        if shot_id in seen:
+                            continue
+                        seen.add(shot_id)
                     club = str(shot.get("clubId") or 0)
                     start, end = shot.get("startLoc") or {}, shot.get("endLoc") or {}
                     lie = str(end.get("lie") or "Unknown")
@@ -239,6 +246,7 @@ def snapshot_from_exports(exports: list[tuple[Path, dict[str, Any]]], local_labe
     # Input order represents file order; the last import selects the account.
     primary = next((data for path, data in exports if path == preferred), exports[-1][1])
     identity = account_ids(primary)
+    model.account_identities = identity
     matching = [(path, data) for path, data in exports if (account_ids(data) == identity and identity) or data is primary]
     model.skipped_files = len(exports) - len(matching)
     matching.sort(key=lambda item: str(item[1].get("exported_at_utc", "")))
@@ -286,7 +294,7 @@ def load_snapshot(folder: Path, local_labels: dict[str, str] | None = None, pref
     entries = []
     skipped = 0
     paths = sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime) if folder.exists() else []
-    for path in paths[-100:]:
+    for path in paths:
         try:
             entries.append((path, read_export(path)))
         except (ValueError, OSError, KeyError, TypeError):

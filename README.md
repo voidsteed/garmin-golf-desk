@@ -36,10 +36,13 @@ respective owners; this project is not affiliated with Garmin.
 Open **Golf Desk** from the desktop shortcut or the Start menu. There is no
 console window. Your existing exports load automatically, without signing in.
 
-- **Overview:** scoring trend, handicap, greens, putting, and recent rounds.
+- **Overview:** selected-period scoring, greens, putting, and recent-game cards.
+  The **Club confidence** tab shows target hits, misses, unknown outcomes, sample
+  sizes, and per-club history charts. Tee fairways, approaches, wedge chips, and
+  putting use separate definitions rather than one misleading universal grade.
 - **Improve my game:** visual current-versus-goal practice bars, approach misses
   by named club, an aggregate miss-direction diagram, and a colored chart of
-  costly holes. Choose the latest three or all imported full rounds. Practice
+  costly holes. It follows the shared game selection. Practice
   goals are starter targets, not strokes-gained estimates; categories overlap.
 - **Course strategy:** a schematic target-zone guide for tee shots, approaches,
   wedges/chips, and putting. Enter current trouble, distances, reliable carry,
@@ -50,8 +53,10 @@ console window. Your existing exports load automatically, without signing in.
   Positive EV means lower expected strokes than the alternative. Human-error
   stress tests and remaining-stroke uncertainty are explicit assumptions, not
   statistical confidence intervals. FIR/GIR alone are not the objective.
-- **Latest 3 rounds:** comparison, hole-by-hole scorecards, penalties, and
-  detailed-shot coverage.
+- **Rounds & trends:** score, GIR, fairways, putting, penalty, and three-putt
+  charts across the selected games, with optional rolling averages and
+  older-half/recent-half comparisons. Click a point to open its scorecard, or
+  export the exact chosen games as CSV.
 - **Approach clubs:** recent approach outcomes by club, individual shot logs,
   and a separate view for Garmin's aggregate club statistics. Unknown outcomes
   and unassigned clubs are shown explicitly, not treated as successful shots.
@@ -63,10 +68,50 @@ console window. Your existing exports load automatically, without signing in.
   scorecards, not incomplete auto-detected putt lists. Wedge approaches, chips,
   and other shots are kept separate; measured shot length is not carry distance.
 
-Use **Update from Garmin** to sign in and choose how many rounds to import.
-Detailed shots and locations are optional. Use **Get latest 3 shot details** for
-the focused three-round approach analysis. Passwords and verification codes are
-entered in masked dialogs inside the app, not in a chat or console.
+Use **Update from Garmin** to sign in and choose how many scorecards to import.
+Detailed shots and locations are optional. **Update detailed shots** opens an
+explicit import dialog for the selected history depth. Passwords and verification
+codes are entered in masked dialogs inside the app, not in a chat or console.
+
+### Choose the games to analyze
+
+The shared **GAMES** selector offers last 3, 5, 10, 20, 30, 50, or 100 games,
+all imported games, and a custom positive count. **Choose games…** opens a
+searchable checkbox list for any specific combination of imported games.
+Selection is shared across overview, trends, scorecards, improvement, club
+analysis, tee/short-game data, and the history used by the strategy guide.
+
+- Completed imported 9- and 18-hole games are eligible by default. Tick
+  **18-hole games only** when you want that narrower selection.
+- Scores, penalties, and three-putt counts for 9 and 18 holes are charted
+  separately. Overall scoring/per-game putting averages use one length at a time;
+  accuracy and per-hole rates pool their recorded opportunities.
+- All trend points run oldest to newest. Missing metric values are gaps, never
+  zeroes. A rolling average requires its entire selected-game window to be
+  recorded. Accuracy and per-hole rates are pooled using their denominators;
+  per-game stroke counts use equal-game means.
+- If you request 30 games but only 18 matching games are imported, the app says
+  **18 of 30**, rather than substituting sample data. **Import more games** opens
+  the import dialog; changing the filter never signs in or downloads automatically.
+- Selection is remembered in `%LOCALAPPDATA%\GolfDesk\round-selection.json`.
+  Generic last-N preferences survive a first import or account change, but
+  hand-picked game IDs are account-scoped and never inherited by another account.
+- Garmin's account handicap, aggregate club statistics/direction diagram, and
+  manual EV assumptions are explicitly **not** period-filtered.
+
+### Interpreting club confidence
+
+Target hits are role-specific: fairways for par-4/5 tees, on-green finishes for
+approaches/chips, and one- or two-putt holes for putting. These are not all
+equally difficult shots, and a target miss is not automatically a poor decision.
+Unknown outcomes, missing coverage, and unassigned clubs remain visible.
+
+Clubs with fewer than 10 classified records are marked as small samples. The
+optional consistency ranking uses a conservative observed-rate bound; 10 is a
+display threshold, not proof of reliability. Approximate 95% Wilson intervals
+assume broadly comparable recorded shots. They are not psychological confidence,
+a calibrated current-shot probability, or evidence of positive EV. Your choice
+of games and tracking gaps can bias these rates.
 
 Personal exports, local club names, and the encrypted session are stored under
 `%LOCALAPPDATA%\GolfDesk`, outside the source repository. The GUI uses
@@ -127,7 +172,7 @@ types are not assigned a made-up iron or wood name.
 Recent shot outcomes use Garmin's `APPROACH` classification and recorded end
 lies. Green finishes are not the same as GIR or strokes gained. Missing holes,
 unknown outcomes, and small samples remain visible. Aggregate club percentages
-are not restricted to the latest three rounds, and `shotsCount` is not an
+are not restricted to the selected games, and `shotsCount` is not an
 approach-attempt denominator. Recorded shot length is not carry distance.
 
 Exports are combined only when their player profile IDs match. Data from
@@ -194,8 +239,11 @@ the command line or an environment variable.
 .venv\Scripts\python.exe -I export_golf.py --rounds 20 --include-shots
 ```
 
-`--rounds` accepts 1 through 100. Requests are paced, and authentication failures
-or rate limits stop further data requests while preserving any partial results.
+`--rounds` accepts 1 through 1000 scorecards, using summary pages of at most 100.
+Imports with detailed shots are limited to 100 rounds at a time to keep location
+exports and API load bounded. Requests are paced; authentication failures or rate
+limits stop further reads while preserving partial results. Repeated summary
+pages are detected rather than duplicated indefinitely.
 
 For just the latest three rounds with detailed shots, double-click
 **Export Latest 3 Rounds.cmd**. This explicitly includes shot locations and may
@@ -215,7 +263,10 @@ python -m venv .venv
 The tests use fake responses and do not sign in to Garmin or access an account.
 They cover Windows encryption, corrupted-cache rejection, saved-session reuse,
 secret cleanup, data/account separation, missing approach outcomes, and UI
-navigation and masked sign-in dialogs. No additional GUI dependency is needed;
+navigation and masked sign-in dialogs. History tests cover preset/custom/manual
+selection, account-scoped preferences, chronological trends, missing-data gaps,
+pooled rolling rates, 9/18-hole separation, pagination, and role-specific club
+confidence counts. No additional GUI dependency is needed;
 the app uses Python's Windows Tk toolkit.
 `requirements.lock.txt` records the dependency versions installed during setup;
 `requirements.txt` pins just the main library for a fresh dependency resolution.
