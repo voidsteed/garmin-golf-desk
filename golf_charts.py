@@ -206,8 +206,8 @@ def draw_history_trend(canvas,series,window=5,on_round=None):
         low=max(0,math.floor(min(values)-3))
         high=math.ceil(max(values)+3)
     else:
-        low=0
-        high=max(1,max(values)*1.2)
+        low=min(0,math.floor(min(values)-1)) if min(values)<0 else 0
+        high=max(low+1,1,max(values)*1.2)
     left,right,top,bottom=48,w-25,30,h-53
     y_for=lambda value:bottom-(value-low)/(high-low)*(bottom-top)
     for i in range(5):

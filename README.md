@@ -40,10 +40,13 @@ console window. Your existing exports load automatically, without signing in.
   The **Club confidence** tab shows target hits, misses, unknown outcomes, sample
   sizes, and per-club history charts. Tee fairways, approaches, wedge chips, and
   putting use separate definitions rather than one misleading universal grade.
-- **Improve my game:** visual current-versus-goal practice bars, approach misses
-  by named club, an aggregate miss-direction diagram, and a colored chart of
-  costly holes. It follows the shared game selection. Practice
-  goals are starter targets, not strokes-gained estimates; categories overlap.
+- **Improve my game → Research coach:** selected-game priorities, a tracking
+  audit, mutually exclusive big-hole score accounting and par-specific charts,
+  a private round journal, measured carry/chip practice, contextual approach
+  comparisons, and an optional reference-driven strokes-gained workbench.
+  **Visual dashboard** retains the current-versus-goal bars, approach misses,
+  aggregate miss-direction diagram and costly-hole chart. Its starter practice
+  goals are not strokes-gained estimates and their categories overlap.
 - **Course strategy:** a schematic target-zone guide for tee shots, approaches,
   wedges/chips, and putting. Enter current trouble, distances, reliable carry,
   lie/wind conditions and your green read. It does not invent a live hole map,
@@ -96,8 +99,83 @@ analysis, tee/short-game data, and the history used by the strategy guide.
 - Selection is remembered in `%LOCALAPPDATA%\GolfDesk\round-selection.json`.
   Generic last-N preferences survive a first import or account change, but
   hand-picked game IDs are account-scoped and never inherited by another account.
-- Garmin's account handicap, aggregate club statistics/direction diagram, and
-  manual EV assumptions are explicitly **not** period-filtered.
+- Garmin's account handicap, aggregate club statistics/direction diagram,
+  practice-session measurements, imported benchmark reference, and manual EV
+  assumptions are explicitly **not** period-filtered. Research analyses of
+  on-course records and the round journal follow the chosen games.
+
+### Research coach
+
+Open **Improve my game → Research coach** and use its view selector:
+
+- **Research insights** generates priorities from your selected games. It shows
+  double/triple-or-worse holes by par, mean scores, and exclusive groups for
+  penalty only, three-putt only, both, neither recorded, and unknown tracking.
+  Each big hole appears once in the score-accounting totals. These flags are
+  associations, **not causal or additive stroke-saving estimates**. The scenario
+  of capping triple-or-worse holes at double is bookkeeping, not a forecast.
+- **Tracking audit** identifies missing scores, putts, penalties, detailed-shot
+  coverage, club assignments and ending lies, plus inconsistent totals. GPS putt
+  records are compared with scorecard counts without assuming either is wrong.
+  Marking an item reviewed does not repair it or turn unknown data into zero.
+- **Round journal** records verified scorecard checks, first-putt bins or exact
+  feet, estimated/measured distance basis, short-return misses, penalty phase and
+  reason, and optional notes. Log successful holes as well as failures. The
+  first-putt chart uses only current saved notes with usable scorecard counts.
+- **Carry & chip practice** logs measured carry and signed lateral miss, keeping
+  ordinary mishits. Only explicitly tagged tracking errors are excluded from
+  summaries. Full swings, controlled pitches and chip trials are separate, as
+  are dates, matched sessions/targets, lies and conditions. Charts show paired
+  attempts and empirical carry percentiles—not a fitted flight/error model.
+  Chip trials show leave distance and total strokes through hole-out when logged.
+- **Approach context** groups records by starting-distance band, lie and club.
+  Locally tagged lay-ups/recoveries can be excluded explicitly. Coordinate units
+  must first pass endpoint-length consistency checks before recorded-pin proxies
+  are shown. That checks encoding consistency, **not the actual cup position or
+  GPS putting accuracy**. Confirmed local states are labeled separately. These
+  are descriptive strata, not statistically adjusted causal club comparisons.
+- **Strokes-gained reference** accepts a user-supplied, permitted expected-strokes
+  CSV with a name, population/handicap label and source. No proprietary benchmark
+  or made-up personal reference is included. It supports observed-shot state
+  comparisons, not calibrated probabilities for a proposed next shot.
+
+The reference CSV columns are `lie,distance_yards,expected_strokes`. The app can
+save a **blank header-only template**. Recognized lies are Tee, Fairway, Rough,
+Bunker, Green and Recovery. All reference distances are in **yards**, even on
+the green; divide feet by three. Each included lie needs at least two distinct
+positive distances and nondecreasing expected strokes. Interpolation stays
+within that lie's supported range; extrapolation is disabled. Format checks do
+not certify the reference's accuracy or suitability for your goal handicap.
+
+Selected-record reference values require additional checks:
+
+- First-putt sequences need explicit feet, a distance basis, verified scorecard
+  counts, and **all strokes from the first putt through hole-out**, including
+  penalties or off-green recovery. They are not isolated putting SG when later
+  non-putting strokes occur. Bins alone never become precise distances.
+- Non-putting shots need checked start/end states, an explicit immediate penalty
+  count (including zero), and reconciled verified hole penalties. Review tee,
+  approach, chip and recovery states in the workbench's shot queue. GPS drafts
+  are never automatically verified; on-green end-distance drafts stay blank.
+- Changed source counts invalidate the affected round review. Changed source
+  holes/shots retain your notes but require rechecking before supported analyses.
+  Unsupported records stay unavailable—not zero SG. Do not interpret a partial
+  subset as whole-round SG, or sum overlapping sequences and individual shots.
+
+The rating/slope-adjusted gross chart is only `113 × (gross − rating) / slope`.
+It lacks PCC and handicap-adjusted gross corrections and is **not an official
+WHS differential or Handicap Index**. Public Shot Scope cohorts and linked
+research sources provide context, not matched personal outcome probabilities.
+The EV planner still requires your explicit assumptions and sensitivity checks.
+
+Research notes and any imported reference live in the **unencrypted**, account-
+scoped `%LOCALAPPDATA%\GolfDesk\research-notes.json`, outside Git. They never
+edit Garmin exports or upload to Garmin. Ordinary JSON golf exports do not
+include them; CSVs you explicitly save contain private measurements. Back up the
+journal separately if needed. Malformed journals are not overwritten, and a
+window with stale notes refuses to overwrite a newer file. Use **Data & privacy
+→ Reload saved data** after another window changes notes. Unsaved form entries
+prompt before navigation, game-filter changes, reload or close.
 
 ### Interpreting club confidence
 
@@ -113,7 +191,7 @@ assume broadly comparable recorded shots. They are not psychological confidence,
 a calibrated current-shot probability, or evidence of positive EV. Your choice
 of games and tracking gaps can bias these rates.
 
-Personal exports, local club names, and the encrypted session are stored under
+Personal exports, research notes, local club names, and the encrypted session are stored under
 `%LOCALAPPDATA%\GolfDesk`, outside the source repository. The GUI uses
 `%LOCALAPPDATA%\GolfDesk\exports`; the optional console exporter still uses its
 own `exports` folder unless you choose another output directory.
@@ -266,7 +344,11 @@ secret cleanup, data/account separation, missing approach outcomes, and UI
 navigation and masked sign-in dialogs. History tests cover preset/custom/manual
 selection, account-scoped preferences, chronological trends, missing-data gaps,
 pooled rolling rates, 9/18-hole separation, pagination, and role-specific club
-confidence counts. No additional GUI dependency is needed;
+confidence counts. Research tests cover exclusive score accounting, missing/invalid counts,
+account-scoped atomic journals, stale-source checks, ordinary mishit retention,
+matched practice groups, coordinate-scale validation, reference range/penalty
+gates, first-putt sequence counts, and unsaved-form protection.
+No additional GUI dependency is needed;
 the app uses Python's Windows Tk toolkit.
 `requirements.lock.txt` records the dependency versions installed during setup;
 `requirements.txt` pins just the main library for a fresh dependency resolution.

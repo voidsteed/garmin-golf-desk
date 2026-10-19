@@ -85,7 +85,10 @@ def main():
     failures = []
     app.root.report_callback_exception = lambda kind,value,tb: failures.append(kind.__name__)
     try:
+        research={"research-insights":"Research insights","research-audit":"Tracking audit","research-journal":"Round journal",
+                  "research-practice":"Carry & chip practice","research-context":"Approach context","research-reference":"Strokes-gained reference"}
         screens = [("improve","improve"),("strategy","improve"),("ev","improve"),("overview","overview"),("confidence","overview"),("confidence-tee","overview"),("confidence-putting","overview"),("rounds","rounds"),("scorecards","rounds"),("clubs","clubs"),("tee","game"),("putting","game"),("wedges","game"),("privacy","privacy")]
+        screens += [(filename,"improve") for filename in research]
         for filename,page in screens:
             if page=="overview":
                 app.overview_tab="confidence" if filename.startswith("confidence") else "summary"
@@ -93,7 +96,9 @@ def main():
             if page=="rounds":
                 app.rounds_tab="scorecards" if filename=="scorecards" else "trends"
             if page=="improve":
-                app.improve_tab = "strategy" if filename=="strategy" else "ev" if filename=="ev" else "dashboard"
+                app.improve_tab = "research" if filename in research else "strategy" if filename=="strategy" else "ev" if filename=="ev" else "dashboard"
+                if filename in research:
+                    app.research_state["view"]=research[filename]
             if page=="game":
                 app.game_tab = filename
             app.show_page(page)
@@ -105,6 +110,12 @@ def main():
                 app.root.update_idletasks()
                 app.root.update()
                 capture(app.root,args.out/(filename+"-details.png"))
+            if filename in ("research-insights","research-practice","research-reference"):
+                for fraction,suffix in ((0.35,"details"),(1.0,"more")):
+                    app.scroll.canvas.yview_moveto(fraction)
+                    app.root.update_idletasks()
+                    app.root.update()
+                    capture(app.root,args.out/(filename+"-"+suffix+".png"))
             if filename=="improve":
                 for fraction,suffix in ((0.42,"details"),(1.0,"holes")):
                     app.scroll.canvas.yview_moveto(fraction)
@@ -135,7 +146,7 @@ def main():
         picker.cancel()
         if failures:
             raise RuntimeError("An interface callback failed")
-        print("All dashboard pages, game tabs and chart details rendered and were captured without signing in.")
+        print("All dashboard pages, game tabs, research views and chart details rendered and were captured without signing in.")
     finally:
         app.close()
 

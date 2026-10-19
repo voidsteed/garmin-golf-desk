@@ -126,6 +126,7 @@ def parse_round(summary: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any
         "three_putts": sum(h.get("putts", 0) >= 3 for h in holes if number(h.get("putts")) is not None) if putt_coverage else None,
         "big_holes": [h for h in holes if h["to_par"] is not None and h["to_par"] >= 2],
         "holes": holes, "shots": shots, "shot_holes": len(shot_holes),
+        "course_rating":number(card.get("teeBoxRating")),"slope_rating":number(card.get("teeBoxSlope")),"tee_box":str(card.get("teeBox") or ""),
     }
 
 

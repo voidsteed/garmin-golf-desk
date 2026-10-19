@@ -20,4 +20,13 @@ oauth1_token.json
 oauth2_token.json
 club-labels.json
 round-selection.json
+research-notes.json
+research-notes.json.*.tmp
+expected-strokes*.csv
+private-practice*.csv
+supported-reference*.csv
+big-hole-research*.csv
+big-hole-accounting*.csv
+tracking-audit*.csv
+approach-context*.csv
 screenshots/

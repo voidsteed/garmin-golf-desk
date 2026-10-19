@@ -15,6 +15,11 @@ applicable terms. This app does not bypass account verification or access contro
 - The app stores personal files under `%LOCALAPPDATA%\GolfDesk`, not in this
   repository. Golf exports themselves are unencrypted and can include course
   names, times, and GPS positions. Treat them as private.
+- `research-notes.json` contains unencrypted account-scoped review notes,
+  first-putt measurements, practice records and any user-imported benchmark.
+  Account scoping is not encryption. These notes are not uploaded to Garmin or
+  included in ordinary golf JSON exports. Back them up privately; explicitly
+  exported research CSVs can also reveal personal golf information.
 - Forgetting sign-in removes the local encrypted cache, not an already issued
   token at Garmin. Revoke account access through Garmin if compromise is suspected.
 - Do not attach real exports, screenshots, passwords, verification codes, or

@@ -11,6 +11,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 import webbrowser
 from datetime import date
 from pathlib import Path
@@ -34,6 +35,8 @@ from golf_store import SessionStore, SessionStoreError, app_data_dir
 from golf_history import MAX_HISTORY_COUNT,RoundSelection,load_selection,save_selection,period_statistics,trend_series,default_trend_keys
 from golf_history_ui import RoundPicker
 from golf_confidence import ROLES,MIN_CLASSIFIED_SHOTS,club_confidence,club_history
+from golf_research_store import ResearchStore,account_key
+from golf_research_ui import ResearchCoachView
 
 TITLE = "Golf Desk · Garmin golf"
 BG, WHITE, INK, MUTED = "#F3F6F3", "#FFFFFF", "#15382E", "#65766D"
@@ -225,6 +228,9 @@ class GolfApp:
         self.data_dir = data_dir if data_dir is not None else app_data_dir()
         self.export_dir = export_dir if export_dir is not None else self.data_dir / "exports"
         self.store = SessionStore(self.data_dir / "garmin-session.dpapi")
+        self.research_store=ResearchStore(self.data_dir/"research-notes.json")
+        self.research_state={}
+        self.research_view=None
         self.local_labels = self.read_labels()
         self.model = load_snapshot(self.export_dir, self.local_labels)
         self.history=load_selection(self.data_dir/"round-selection.json",self.model.account_identities)
@@ -238,7 +244,7 @@ class GolfApp:
         self.selected_round = None
         self.pattern_club = None
         self.game_tab = "tee"
-        self.improve_tab = "dashboard"
+        self.improve_tab = "research"
         self.strategy_state = {}
         self.ev_state = {}
         self.overview_tab="summary"
@@ -270,6 +276,7 @@ class GolfApp:
         style.theme_use("clam")
         style.configure("Treeview", background=WHITE, fieldbackground=WHITE, foreground=INK, font=(FONT, 10), rowheight=34, borderwidth=0)
         style.configure("Treeview.Heading", background="#ECF1EC", foreground=MUTED, font=(FONT, 9, "bold"), relief="flat", padding=(8, 10))
+        self.table_heading_font=tkfont.Font(root=self.root,font=(FONT,9,"bold"))
         style.map("Treeview", background=[("selected", "#D5EDDF")], foreground=[("selected", INK)])
         style.configure("TCheckbutton", background=WHITE, foreground=INK, font=(FONT, 10), padding=2)
         style.configure("History.TCheckbutton",background=BG,foreground=INK,font=(FONT,9),padding=2)
@@ -387,6 +394,9 @@ class GolfApp:
             self.import_history_button.pack_forget()
 
     def apply_history(self,selection):
+        if not self.confirm_research_leave():
+            self.refresh_history_controls()
+            return
         self.history=selection
         self.approach_round=None
         self.selected_round=None
@@ -450,6 +460,9 @@ class GolfApp:
             self.notice.pack_forget()
 
     def show_page(self, key):
+        if not self.confirm_research_leave():
+            return
+        self.research_view=None
         self.page = key
         titles = {"overview": ("Your golf, at a glance.", "A clear picture from your saved scorecards."),
                   "improve": ("What to improve next.", "Visual priorities from your real rounds—not a swing diagnosis."),
@@ -497,12 +510,15 @@ class GolfApp:
         wrap.pack(fill="both", expand=True, padx=18, pady=(0, 18))
         tree = ttk.Treeview(wrap, columns=[x[0] for x in columns], show="headings", height=height)
         bar = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=bar.set)
+        across=ttk.Scrollbar(wrap,orient="horizontal",command=tree.xview)
+        tree.configure(yscrollcommand=bar.set,xscrollcommand=across.set)
+        across.pack(side="bottom",fill="x")
         bar.pack(side="right", fill="y")
         tree.pack(side="left", fill="both", expand=True)
         for name, title, width in columns:
             tree.heading(name, text=title, command=lambda c=name: self.sort_tree(tree, c))
-            tree.column(name, width=width, minwidth=min(width, 65), anchor="w" if name in ("club", "course", "file", "name", "source") else "center", stretch=True)
+            minimum=max(min(width,65),self.table_heading_font.measure(title)+24)
+            tree.column(name, width=max(width,minimum), minwidth=minimum, anchor="w" if name in ("club", "course", "file", "name", "source") else "center", stretch=True)
         tree.tag_configure("highlight", background=MINT)
         tree.tag_configure("caution", background=AMBER_BG)
         tree.tag_configure("muted", foreground=MUTED)
@@ -559,6 +575,7 @@ class GolfApp:
             label(focus, headline, 10, True).pack(anchor="w", padx=18, pady=(4, 3))
             label(focus, text, 9, color=MUTED, wraplength=310, justify="left").pack(anchor="w", padx=18, pady=(0, 9))
         button(focus, "Review approach clubs →", lambda: self.show_page("clubs")).pack(anchor="w", padx=18, pady=(4, 16))
+        button(focus,"Open research coach →",lambda:self.go_research()).pack(anchor="w",padx=18,pady=(0,16))
         label(body, f"RECENT GAMES IN THIS SELECTION · showing {min(3,len(selected))} of {len(selected)}", 10, True, MUTED, BG).pack(anchor="w", pady=(3, 12))
         latest = tk.Frame(body, bg=BG)
         latest.pack(fill="x", pady=(0, 18))
@@ -670,10 +687,15 @@ class GolfApp:
         views = tk.Frame(body,bg=BG)
         views.pack(fill="x",pady=(0,18))
         def choose_view(tab):
+            if not self.confirm_research_leave():
+                return
             self.improve_tab = tab
             self.show_page("improve")
-        for key,title in (("dashboard","Visual dashboard"),("strategy","Course strategy"),("ev","Expected score / EV")):
+        for key,title in (("research","Research coach"),("dashboard","Visual dashboard"),("strategy","Course strategy"),("ev","Expected score / EV")):
             button(views,title,lambda k=key:choose_view(k),primary=self.improve_tab==key).pack(side="left",padx=(0,10))
+        if self.improve_tab=="research":
+            self.research_view=ResearchCoachView(self,body,self.research_state)
+            return
         if self.improve_tab=="strategy":
             self.strategy_view = StrategyView(body,self.model,self.strategy_state,selected=self.selected_games())
             return
@@ -768,10 +790,25 @@ class GolfApp:
             label(heat,f"Largest recorded hole here: {pretty_date(r['date'])}, hole {h['number']} at {r['course']} — {fmt(h['strokes'],0)} on par {h['par']} ({fmt(h.get('putts'),0)} putts, {fmt(h.get('penalties'),0)} recorded penalties).",10,color=MUTED,wraplength=1080,justify="left").pack(anchor="w",padx=18,pady=(0,18))
 
     def go_game(self, tab="tee"):
+        if not self.confirm_research_leave():
+            return
         self.game_tab = tab
         self.show_page("game")
 
+    def confirm_research_leave(self):
+        view=getattr(self,"research_view",None)
+        return view is None or view.can_leave()
+
+    def go_research(self,view="Research insights"):
+        if not self.confirm_research_leave():
+            return
+        self.improve_tab="research"
+        self.research_state["view"]=view
+        self.show_page("improve")
+
     def go_strategy(self, phase="tee", club_id=None):
+        if not self.confirm_research_leave():
+            return
         self.improve_tab = "strategy"
         self.strategy_state["phase"] = phase
         if club_id is not None:
@@ -1069,7 +1106,8 @@ class GolfApp:
         privacy = self.section(body,"What stays where")
         for title,text in (("No Garmin edits","The app reads golf data. It does not upload workouts, change scorecards, or delete Garmin records."),
                            ("Windows-protected session","The encrypted session file is outside exports, under Local AppData / GolfDesk. Other processes running as your Windows user may still access user-protected data."),
-                           ("Private golf exports","JSON exports contain course names, dates, and possibly shot locations. The exports themselves are not encrypted; protect them like other personal files."),
+                            ("Private golf exports","JSON exports contain course names, dates, and possibly shot locations. The exports themselves are not encrypted; protect them like other personal files."),
+                            ("Private research journal","Account-scoped review notes, first-putt distances, practice measurements and any user-supplied reference stay in research-notes.json under the app’s local-data folder. They are unencrypted and never sent to Garmin or included in ordinary golf JSON exports. CSVs you explicitly save are private too."),
                            ("One account at a time","Exports are combined only when their player profile IDs match. Unidentified or other-account exports are not silently mixed."),
                            ("Unofficial API limits","Garmin may change or block this integration. Authentication grants broader account access than this app uses; trust in the library is still required.")):
             label(privacy,title,10,True).pack(anchor="w",padx=18,pady=(8,3))
@@ -1086,6 +1124,7 @@ class GolfApp:
         actions.pack(fill="x",padx=18,pady=(0,18))
         button(actions,"Open exports folder",self.open_exports_folder).pack(side="left")
         button(actions,"Reload saved data",self.reload_data).pack(side="left",padx=10)
+        button(actions,"Open private data folder",self.open_data_folder).pack(side="left")
         label(body,"This app is not made or supported by Garmin. Passwords, verification codes, and decrypted tokens must never be shared in chat.",9,color=MUTED,bg=BG,wraplength=1090,justify="left").pack(anchor="w",pady=(0,16))
 
     def empty(self,parent,title,text):
@@ -1142,6 +1181,8 @@ class GolfApp:
             return
         try:
             data = read_export(Path(path))
+            if not self.confirm_research_leave():
+                return
             saved = save_export(data,self.export_dir)
             self.reload_data(preferred=saved)
             self.show_notice("Imported your saved golf data. No sign-in or Garmin account changes were needed.")
@@ -1152,14 +1193,26 @@ class GolfApp:
         self.export_dir.mkdir(parents=True,exist_ok=True)
         os.startfile(self.export_dir)
 
+    def open_data_folder(self):
+        self.data_dir.mkdir(parents=True,exist_ok=True)
+        os.startfile(self.data_dir)
+
     def reload_data(self, preferred=None):
+        if not self.confirm_research_leave():
+            self.status.set("A new export may be saved; finish the research form before reloading the displayed data.")
+            return False
         previous=self.model.account_identities
+        previous_research=account_key(self.model)
         self.model = load_snapshot(self.export_dir,self.local_labels,preferred)
+        self.research_store=ResearchStore(self.data_dir/"research-notes.json")
+        if previous_research!=account_key(self.model):
+            self.research_state={}
         if previous!=self.model.account_identities:
             self.history=load_selection(self.data_dir/"round-selection.json",self.model.account_identities)
         self.show_page(self.page)
         self.status.set(f"Loaded {len(self.model.rounds)} scorecards from {len(self.model.sources)} compatible local export(s).")
         self.refresh_session_status()
+        return True
 
     def forget_account(self):
         if self.busy:
@@ -1179,6 +1232,8 @@ class GolfApp:
 
     def open_sync(self, rounds=None, shots=False, force_fresh=False, email_hint=""):
         if self.busy:
+            return
+        if not self.confirm_research_leave():
             return
         rounds=self.recommended_import_count(shots) if rounds is None else rounds
         dialog = SyncDialog(self.root,self.store.exists,rounds,shots,email_hint,force_fresh)
@@ -1255,13 +1310,15 @@ class GolfApp:
                     self.mfa_dialog = self.mfa_pending = None
                 elif kind == "done":
                     self.finish_sync()
-                    self.reload_data(preferred=value.path)
+                    loaded=self.reload_data(preferred=value.path)
                     count = len(value.data.get("golf",{}).get("scorecard_summaries",[]))
                     text = f"Imported {count} round(s). " + ("Sign-in remembered securely on this PC." if value.remembered else "Sign-in was not remembered.")
                     if value.data.get("errors"):
                         text += " Some sections or optional metadata were unavailable; review coverage in the app."
                     if value.warnings:
                         text += " " + " ".join(value.warnings)
+                    if not loaded:
+                        text += " The new export is saved; reload after finishing the research form."
                     self.show_notice(text)
                 elif kind == "signin":
                     self.finish_sync()
@@ -1296,6 +1353,8 @@ class GolfApp:
     def close(self):
         if self.busy and not messagebox.askyesno("Close Golf Desk?","Cancel the update and close? Saved exports and remembered sign-in settings will be kept.",parent=self.root):
             return
+        if not self.confirm_research_leave():
+            return
         self.closed = True
         self.cancel_sync()
         self.root.after_cancel(self.poll_id)
@@ -1309,7 +1368,7 @@ def math_floor(value, step):
     return int(value//step)*step
 
 
-def main():
+def main(initial_page="overview"):
     mutex = None
     if os.name == "nt":
         try:
@@ -1335,7 +1394,7 @@ def main():
                 user.SetForegroundWindow(ctypes.c_void_p(handle))
             return
     try:
-        GolfApp(initial_page="overview").run()
+        GolfApp(initial_page=initial_page).run()
     finally:
         if mutex:
             kernel.CloseHandle.argtypes = [ctypes.c_void_p]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "garmin-golf-desk"
-version = "0.2.0"
+version = "0.3.0"
 description = "A private Windows golf dashboard and transparent course-management planner for your own Garmin account"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -26,4 +26,5 @@ py-modules = [
   "golf_data", "golf_ev", "golf_game", "golf_icon", "golf_planner_ui",
   "golf_service", "golf_store", "golf_strategy",
   "golf_history", "golf_history_ui", "golf_confidence",
+  "golf_research", "golf_research_store", "golf_research_ui", "golf_research_charts", "golf_baselines",
 ]
